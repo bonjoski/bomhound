@@ -1,0 +1,25 @@
+# Binaries and build artifacts
+bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test outputs and temporary directories
+output/
+output-*/
+*.tmp
+*.test
+/tmp/
+
+# Cache directories
+.bomhound-cache/
+
+# OS and Editor files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~

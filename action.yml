@@ -1,0 +1,42 @@
+name: 'bomhound'
+description: 'Enrich Software Bill of Materials (SBOMs) with verified copyright, provenance, and legal attribution notices'
+author: 'bonjoski'
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  sbom:
+    description: 'Path to SBOM file or directory to enrich'
+    required: false
+    default: '.'
+  output_dir:
+    description: 'Output directory for enriched SBOMs'
+    required: false
+    default: 'output'
+  in_place:
+    description: 'Overwrite input SBOM file in-place'
+    required: false
+    default: 'false'
+  github_token:
+    description: 'GitHub token for API access'
+    required: false
+    default: ${{ github.token }}
+  concurrency:
+    description: 'Worker concurrency'
+    required: false
+    default: '5'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Run bomhound
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+      run: |
+        IN_PLACE_FLAG=""
+        if [ "${{ inputs.in_place }}" = "true" ]; then
+          IN_PLACE_FLAG="--in-place"
+        fi
+        bomhound --output-dir "${{ inputs.output_dir }}" --concurrency "${{ inputs.concurrency }}" $IN_PLACE_FLAG "${{ inputs.sbom }}"

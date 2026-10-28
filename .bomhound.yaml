@@ -1,0 +1,24 @@
+# bomhound configuration file
+version: "1"
+
+# Exclusion rules for internal/private components or non-library artifacts
+exclude:
+  purls:
+    - "pkg:rpm/*"
+    # - "pkg:golang/my-corp.internal/*"
+  names:
+    # - "internal-*"
+
+# Custom vanity URL mappings (prefix -> target github repo)
+vanity_urls:
+  # "software.sslmate.com/src/go-pkcs12": "SSLMate/go-pkcs12"
+
+# Cache configuration
+cache:
+  # dir: ".bomhound-cache"
+  ttl_days: 30
+
+# Compliance threshold enforcement (exits with code 5 if threshold is breached)
+compliance:
+  min_coverage_percent: 0.0
+  fail_on_missing: false

@@ -1,0 +1,18 @@
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - govet
+    - errcheck
+    - staticcheck
+    - gosimple
+    - unused
+    - gofmt
+    - ineffassign
+    - typecheck
+    - misspell
+
+linters-settings:
+  gofmt:
+    simplify: true
