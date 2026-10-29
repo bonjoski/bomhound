@@ -20,6 +20,9 @@ builds:
     goarch:
       - amd64
       - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
     ldflags:
       - -s -w -X github.com/bonjoski/bomhound/pkg/bomhound.Version={{.Version}} -X github.com/bonjoski/bomhound/pkg/bomhound.GitCommit={{.Commit}} -X github.com/bonjoski/bomhound/pkg/bomhound.BuildDate={{.Date}}
 
@@ -40,6 +43,19 @@ archives:
 
 checksum:
   name_template: 'checksums.txt'
+  algorithm: sha256
+
+signs:
+  - id: cosign
+    artifacts: checksum
+    cmd: cosign
+    args:
+      - "sign-blob"
+      - "--yes"
+      - "--output-certificate=${certificate}"
+      - "--output-signature=${signature}"
+      - "${artifact}"
+    output: true
 
 changelog:
   sort: asc
