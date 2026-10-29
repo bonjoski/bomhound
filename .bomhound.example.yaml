@@ -1,5 +1,9 @@
-# bomhound configuration file
+# bomhound configuration example
 version: "1"
+
+# Authentication settings (hardware-bound Locksmith vault)
+auth:
+  locksmith_key: "GH-Read" # Name of your secret in Locksmith ('locksmith add <key>')
 
 # Exclusion rules for internal/private components or non-library artifacts
 exclude:

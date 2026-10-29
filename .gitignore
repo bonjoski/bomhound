@@ -24,3 +24,9 @@ output-*/
 .vscode/
 *.swp
 *~
+
+# User configuration files (must not be committed)
+.bomhound.yaml
+.bomhound.yml
+*.local.yaml
+*.local.yml

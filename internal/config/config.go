@@ -14,10 +14,16 @@ import (
 // Config represents the configuration for bomhound.
 type Config struct {
 	Version    string            `yaml:"version"`
+	Auth       AuthConfig        `yaml:"auth"`
 	Exclude    ExcludeConfig     `yaml:"exclude"`
 	VanityURLs map[string]string `yaml:"vanity_urls"`
 	Cache      CacheConfig       `yaml:"cache"`
 	Compliance ComplianceConfig  `yaml:"compliance"`
+}
+
+// AuthConfig specifies authentication and credential provider settings.
+type AuthConfig struct {
+	LocksmithKey string `yaml:"locksmith_key"`
 }
 
 // ExcludeConfig specifies patterns for excluding components from enrichment.

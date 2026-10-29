@@ -29,7 +29,7 @@ func main() {
 	inPlace := flag.Bool("in-place", false, "Overwrite input SBOM files in-place")
 	concurrency := flag.Int("concurrency", 5, "Number of concurrent workers")
 	configPath := flag.String("config", "", "Path to configuration file (.bomhound.yaml)")
-	locksmithKey := flag.String("locksmith-key", auth.DefaultLocksmithKey, "Key name for GitHub token in Locksmith vault")
+	locksmithKey := flag.String("locksmith-key", "", "Key name for GitHub token in Locksmith vault (overrides config)")
 	tokenStdin := flag.Bool("token-stdin", false, "Read GitHub token from standard input")
 	showVersion := flag.Bool("version", false, "Print version information and exit")
 	flag.BoolVar(showVersion, "v", false, "Print version information and exit (shorthand)")
@@ -60,8 +60,13 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	key := *locksmithKey
+	if key == "" {
+		key = cfg.Auth.LocksmithKey
+	}
+
 	token, err := auth.GetGitHubToken(ctx, auth.TokenOptions{
-		LocksmithKey: *locksmithKey,
+		LocksmithKey: key,
 		TokenStdin:   *tokenStdin,
 	})
 	if err != nil {
