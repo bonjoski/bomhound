@@ -27,6 +27,12 @@ A high-performance CLI tool and Go library for enriching Software Bill of Materi
 - Go 1.21 or later
 - GitHub Personal Access Token (provided via `GITHUB_TOKEN` environment variable or system keyring)
 
+### Homebrew (macOS & Linux)
+```bash
+brew tap bonjoski/tap
+brew install bomhound
+```
+
 ### Go Install
 ```bash
 go install github.com/bonjoski/bomhound/cmd/bomhound@latest
