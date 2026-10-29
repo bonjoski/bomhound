@@ -30,7 +30,14 @@ func main() {
 	inPlace := flag.Bool("in-place", false, "Overwrite input SBOM files in-place")
 	concurrency := flag.Int("concurrency", 5, "Number of concurrent workers")
 	configPath := flag.String("config", "", "Path to configuration file (.bomhound.yaml)")
+	showVersion := flag.Bool("version", false, "Print version information and exit")
+	flag.BoolVar(showVersion, "v", false, "Print version information and exit (shorthand)")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("bomhound %s\n", bomhound.FormattedVersion())
+		os.Exit(0)
+	}
 
 	args := flag.Args()
 	filePath := "."

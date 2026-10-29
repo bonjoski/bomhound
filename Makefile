@@ -4,12 +4,16 @@ BINARY_NAME=bomhound
 BUILD_DIR=bin
 OUTPUT_DIR=output
 
+GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
+BUILD_DATE ?= $(shell date -u +"%Y-%m-%d" 2>/dev/null || echo "unknown")
+LDFLAGS = -X github.com/bonjoski/bomhound/pkg/bomhound.GitCommit=$(GIT_COMMIT) -X github.com/bonjoski/bomhound/pkg/bomhound.BuildDate=$(BUILD_DATE)
+
 all: build
 
 build:
 	@echo "Building $(BINARY_NAME)..."
 	@mkdir -p $(BUILD_DIR)
-	go build -o $(BUILD_DIR)/$(BINARY_NAME) cmd/bomhound/main.go
+	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME) cmd/bomhound/main.go
 
 test:
 	@echo "Running tests..."
