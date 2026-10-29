@@ -32,11 +32,13 @@ runs:
   steps:
     - name: Run bomhound
       shell: bash
-      env:
-        GITHUB_TOKEN: ${{ inputs.github_token }}
       run: |
         IN_PLACE_FLAG=""
         if [ "${{ inputs.in_place }}" = "true" ]; then
           IN_PLACE_FLAG="--in-place"
         fi
-        bomhound --output-dir "${{ inputs.output_dir }}" --concurrency "${{ inputs.concurrency }}" $IN_PLACE_FLAG "${{ inputs.sbom }}"
+        if [ -n "${{ inputs.github_token }}" ]; then
+          printf '%s' "${{ inputs.github_token }}" | bomhound --token-stdin --output-dir "${{ inputs.output_dir }}" --concurrency "${{ inputs.concurrency }}" $IN_PLACE_FLAG "${{ inputs.sbom }}"
+        else
+          bomhound --output-dir "${{ inputs.output_dir }}" --concurrency "${{ inputs.concurrency }}" $IN_PLACE_FLAG "${{ inputs.sbom }}"
+        fi

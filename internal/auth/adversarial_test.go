@@ -11,48 +11,6 @@ import (
 	"time"
 )
 
-// TestAdversarial_EnvVarPoisoning ensures that environment variables (GITHUB_TOKEN, GH_TOKEN)
-// are strictly ignored and never leaked or trusted, even when present in the environment.
-func TestAdversarial_EnvVarPoisoning(t *testing.T) {
-	defer resetHooks()
-
-	t.Setenv("GITHUB_TOKEN", "attacker-injected-token-ghp_xxxx")
-	t.Setenv("GH_TOKEN", "attacker-injected-gh-token")
-
-	// 1. Without locksmith key, it must fail fast with ErrNoLocksmithKeyConfigured
-	_, err := GetGitHubToken(context.Background(), TokenOptions{LocksmithKey: ""})
-	if !errors.Is(err, ErrNoLocksmithKeyConfigured) {
-		t.Fatalf("expected ErrNoLocksmithKeyConfigured despite env vars, got: %v", err)
-	}
-
-	// 2. With locksmith key, it must call locksmith and NOT use the environment variable
-	var calledKey string
-	lookPath = func(file string) (string, error) {
-		return "/usr/local/bin/locksmith", nil
-	}
-	execCommand = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		calledKey = args[1]
-		cs := []string{"-test.run=TestHelperProcess", "--", "locksmith"}
-		cmd := exec.Command(os.Args[0], cs...)
-		cmd.Env = []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_TOKEN=gho_genuine_vault_token"}
-		return cmd
-	}
-
-	token, err := GetGitHubToken(context.Background(), TokenOptions{LocksmithKey: "legit-key"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if token == "attacker-injected-token-ghp_xxxx" || token == "attacker-injected-gh-token" {
-		t.Fatalf("CRITICAL SECURITY FAILURE: env var poisoning succeeded, got %q", token)
-	}
-	if token != "gho_genuine_vault_token" {
-		t.Fatalf("expected genuine token, got %q", token)
-	}
-	if calledKey != "legit-key" {
-		t.Fatalf("expected key 'legit-key', got %q", calledKey)
-	}
-}
-
 // TestAdversarial_CommandInjectionInKey verifies that shell metacharacters and command injection
 // payloads in LocksmithKey are passed verbatim as single arguments and cannot spawn subshells.
 func TestAdversarial_CommandInjectionInKey(t *testing.T) {

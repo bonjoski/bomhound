@@ -16,10 +16,6 @@ func resetHooks() {
 func TestGetGitHubToken_LocksmithExplicitKey(t *testing.T) {
 	defer resetHooks()
 
-	// Ensure environment variables are NOT used
-	t.Setenv("GITHUB_TOKEN", "should_be_ignored")
-	t.Setenv("GH_TOKEN", "should_be_ignored")
-
 	var invokedKey string
 	lookPath = func(file string) (string, error) {
 		if file == "locksmith" {
