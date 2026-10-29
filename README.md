@@ -25,7 +25,11 @@ A high-performance CLI tool and Go library for enriching Software Bill of Materi
 
 ### Prerequisites
 - Go 1.21 or later
-- GitHub Personal Access Token (provided via `GITHUB_TOKEN`, [Locksmith](https://github.com/bonjoski/locksmith) vault, or `gh auth login`)
+- GitHub Personal Access Token (PAT) managed securely:
+  - Configured via [Locksmith](https://github.com/bonjoski/locksmith) biometric vault (configured in `.bomhound.yaml` or `--locksmith-key`)
+  - Piped via standard input (`--token-stdin`)
+  - Retrieved automatically from `gh auth token` fallback
+  *(Note: Environment variables such as `GITHUB_TOKEN` are intentionally **not** read to eliminate credential exposure in `/proc` tables, subshells, and CI environment dumps).*
 
 ### Homebrew (macOS & Linux)
 ```bash
@@ -62,12 +66,18 @@ cat testdata/sample-sbom.cdx.json | bomhound - > enriched-sbom.cdx.json
 ```
 
 ### 3. CI Gate Mode
-Fail the CI pipeline if copyright coverage drops below 90%:
+Enforce coverage thresholds and exit with code 5 on failure by configuring `compliance` in `.bomhound.yaml`:
 ```bash
-bomhound --min-coverage 90.0 --fail-on-missing testdata/sample-sbom.cdx.json
+bomhound --config .bomhound.yaml testdata/sample-sbom.cdx.json
 ```
 
-### 4. Batch Directory Processing
+### 4. Direct Token via Stdin
+In automated CI/CD runners where Locksmith is not available:
+```bash
+echo "$SECRET_TOKEN" | bomhound --token-stdin testdata/sample-sbom.cdx.json
+```
+
+### 5. Batch Directory Processing
 Process all SBOMs in a directory concurrently:
 ```bash
 bomhound --concurrency 20 --output-dir ./enriched ./testdata/
@@ -83,38 +93,55 @@ Usage:
 
 Flags:
   -c, --concurrency int          Number of concurrent workers (default 5)
-  -o, --output-dir string        Directory to write enriched SBOMs (default "output")
-  -i, --in-place                 Overwrite input SBOM file in place
-      --min-coverage float       Minimum copyright coverage percentage required (default 0)
-      --fail-on-missing          Exit with code 5 if any non-excluded component is missing copyright
+  -o, --output-dir string        Directory to save enriched SBOMs (default "output")
+  -i, --in-place                 Overwrite input SBOM files in-place
       --config string            Path to custom .bomhound.yaml configuration file
-      --locksmith-key string     Key name for GitHub token in Locksmith vault (default "GITHUB_TOKEN")
+      --locksmith-key string     Key name for GitHub token in Locksmith vault (overrides config)
+      --token-stdin              Read GitHub token from standard input
+  -v, --version                  Print version information and exit
 ```
 
 ---
 
-## Policy Configuration (`.bomhound.yaml`)
+## Configuration (`.bomhound.yaml`)
 
-Define enterprise exclusions and compliance thresholds in a `.bomhound.yaml` file placed in the working directory:
+`bomhound` looks for a `.bomhound.yaml` file in the current working directory, its parent directories, or in `~/.config/bomhound/config.yaml`.
+
+> [!TIP]
+> Copy the provided template to get started:
+> ```bash
+> cp .bomhound.example.yaml .bomhound.yaml
+> ```
+> `.bomhound.yaml` and `*.local.yaml` are ignored by git so your private vault key configurations remain local to your workstation.
 
 ```yaml
-version: "1.0"
+version: "1"
 
-exclusions:
+# Authentication settings (hardware-bound Locksmith vault)
+auth:
+  locksmith_key: "GH-Read" # Name of your secret in Locksmith ('locksmith add <key>')
+
+# Exclusion rules for internal/private components or non-library artifacts
+exclude:
   purls:
+    - "pkg:rpm/*"
     - "pkg:golang/mycompany.internal/*"
-    - "pkg:npm/@mycompany/*"
   names:
-    - "mycompany.internal/*"
     - "@mycompany/*"
 
-policies:
+# Custom vanity URL mappings (prefix -> target github repo)
+vanity_urls:
+  "software.sslmate.com/src/go-pkcs12": "SSLMate/go-pkcs12"
+
+# Cache configuration
+cache:
+  dir: ".bomhound-cache"
+  ttl_days: 30
+
+# Compliance threshold enforcement (exits with code 5 if threshold is breached)
+compliance:
   min_coverage_percent: 85.0
   fail_on_missing: false
-  allowed_licenses:
-    - "Apache-2.0"
-    - "MIT"
-    - "BSD-3-Clause"
 ```
 
 ---
@@ -154,7 +181,7 @@ func main() {
 
 ## Security & Hardening
 
-- **Credential Isolation**: GitHub tokens are never logged or stored in plain-text files. The authentication resolver supports standard environment variables (`GITHUB_TOKEN`), [Locksmith](https://github.com/bonjoski/locksmith) biometric vault integration, and `gh auth token` CLI fallback.
+- **Credential Isolation**: GitHub tokens are never read from environment variables to prevent accidental exposure in `/proc/<pid>/environ`, subshells, logs, or CI runner dumps. Authentication is strictly config-driven: tokens are retrieved on-demand from the hardware-backed [Locksmith](https://github.com/bonjoski/locksmith) CLI vault (`locksmith get <key> -n`), piped via `--token-stdin`, or resolved via `gh auth token`. No credentials or personal vault keys are ever persisted or committed to git.
 - **SSRF Mitigation**: Custom HTTP dialer enforces RFC 1918, RFC 3927, and RFC 4291 network boundaries, protecting against server-side request forgery when fetching Go vanity meta tags.
 - **Denial-of-Service Protection**: All external response bodies are bounded by `io.LimitReader` (2MB max) to eliminate memory exhaustion from malicious redirects or responses.
 - **Atomic File Writing**: File writes use temporary files and atomic `os.Rename` with strict permission bits (`0600` / `0644`), preventing partial writes and symlink destination hijacking.
