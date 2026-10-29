@@ -219,6 +219,10 @@ func globToRegexp(pattern string) (*regexp.Regexp, error) {
 		c := pattern[i]
 		switch c {
 		case '*':
+			// Collapse redundant consecutive asterisks to prevent exponential NFA states
+			for i+1 < len(pattern) && pattern[i+1] == '*' {
+				i++
+			}
 			b.WriteString(".*")
 		case '?':
 			b.WriteString(".")
