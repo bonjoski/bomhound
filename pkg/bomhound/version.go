@@ -6,7 +6,7 @@ import (
 )
 
 // Version is the single source of truth for bomhound's semantic release version.
-var Version = "0.1.2"
+var Version = "0.1.3"
 
 // GitCommit and BuildDate can be optionally populated at build time via -ldflags.
 var (

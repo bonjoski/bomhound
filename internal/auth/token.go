@@ -3,20 +3,29 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
 )
 
+const (
+	// DefaultLocksmithKey is the default key name in the user's Locksmith vault.
+	DefaultLocksmithKey = "GH-Read"
+)
+
 var (
-	// ErrNoTokenFound is returned when no token could be discovered from environment, Locksmith, or gh CLI.
-	ErrNoTokenFound = errors.New("GitHub token not found. Please provide a token via GITHUB_TOKEN environment variable, Locksmith ('locksmith add GITHUB_TOKEN'), or GitHub CLI ('gh auth login')")
+	// ErrNoTokenFound is returned when no token could be discovered via Locksmith.
+	ErrNoTokenFound = errors.New("GitHub token not found. Please ensure your token is stored in Locksmith ('locksmith add GH-Read') or provide it via --token-stdin")
+	// ErrLocksmithNotFound is returned when the locksmith CLI is not installed in PATH.
+	ErrLocksmithNotFound = errors.New("locksmith binary not found in PATH: please install locksmith (brew install bonjoski/tap/locksmith)")
 )
 
 // TokenOptions configures token discovery.
 type TokenOptions struct {
 	LocksmithKey string
+	TokenStdin   bool
 }
 
 // Internal hooks for testing and mocking external commands
@@ -25,32 +34,52 @@ var (
 	lookPath    = exec.LookPath
 )
 
-// GetGitHubToken retrieves the GitHub token using the standard resolution chain:
-// 1. GITHUB_TOKEN or GH_TOKEN environment variables
-// 2. Locksmith secrets vault (if installed in PATH)
-// 3. GitHub CLI (`gh auth token`, if installed in PATH)
+// GetGitHubToken retrieves the GitHub token using hardware-backed Locksmith CLI.
+// Environment variables are intentionally bypassed to prevent process-table, fork, and CI leak vectors.
 func GetGitHubToken(ctx context.Context, opts ...TokenOptions) (string, error) {
-	// 1. Check environment variables (standard for CI/CD and scripts)
-	if token := strings.TrimSpace(os.Getenv("GITHUB_TOKEN")); token != "" {
-		return token, nil
+	key := DefaultLocksmithKey
+	var readStdin bool
+	if len(opts) > 0 {
+		if opts[0].LocksmithKey != "" {
+			key = opts[0].LocksmithKey
+		}
+		readStdin = opts[0].TokenStdin
 	}
-	if token := strings.TrimSpace(os.Getenv("GH_TOKEN")); token != "" {
+
+	// 1. Check if token requested via standard input
+	if readStdin {
+		var tokenBuilder strings.Builder
+		buf := make([]byte, 1024)
+		for {
+			n, err := os.Stdin.Read(buf)
+			if n > 0 {
+				tokenBuilder.Write(buf[:n])
+			}
+			if err != nil {
+				break
+			}
+		}
+		token := strings.TrimSpace(tokenBuilder.String())
+		if token != "" {
+			return token, nil
+		}
+	}
+
+	// 2. Primary: Hardware-bound Locksmith vault checkout via CLI
+	token, err := getFromLocksmith(ctx, key)
+	if err == nil && token != "" {
 		return token, nil
 	}
 
-	locksmithKey := "GITHUB_TOKEN"
-	if len(opts) > 0 && opts[0].LocksmithKey != "" {
-		locksmithKey = opts[0].LocksmithKey
+	// 3. Fallback: Check gh CLI auth token if locksmith is not found
+	if errors.Is(err, ErrLocksmithNotFound) {
+		if ghToken, ghErr := getFromGH(ctx); ghErr == nil && ghToken != "" {
+			return ghToken, nil
+		}
 	}
 
-	// 2. Attempt Locksmith hardware-bound secret checkout
-	if token, err := getFromLocksmith(ctx, locksmithKey); err == nil && token != "" {
-		return token, nil
-	}
-
-	// 3. Attempt GitHub CLI (gh auth token)
-	if token, err := getFromGH(ctx); err == nil && token != "" {
-		return token, nil
+	if err != nil && !errors.Is(err, ErrLocksmithNotFound) {
+		return "", fmt.Errorf("locksmith retrieval failed for key %q: %w", key, err)
 	}
 
 	return "", ErrNoTokenFound
@@ -59,30 +88,24 @@ func GetGitHubToken(ctx context.Context, opts ...TokenOptions) (string, error) {
 func getFromLocksmith(ctx context.Context, key string) (string, error) {
 	path, err := lookPath("locksmith")
 	if err != nil {
-		return "", err
+		return "", ErrLocksmithNotFound
 	}
 
-	// Try primary key, then common fallbacks if default GITHUB_TOKEN
-	keysToTry := []string{key}
-	if key == "GITHUB_TOKEN" {
-		keysToTry = []string{"GITHUB_TOKEN", "github_token", "GH_TOKEN", "GH-Read"}
-	}
-
-	timeoutCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	for _, k := range keysToTry {
-		cmd := execCommand(timeoutCtx, path, "get", k, "-n")
-		out, err := cmd.Output()
-		if err == nil {
-			val := strings.TrimSpace(string(out))
-			if val != "" && !strings.HasPrefix(val, "Error:") && !strings.Contains(val, "Secret not found") {
-				return val, nil
-			}
-		}
+	cmd := execCommand(timeoutCtx, path, "get", key, "-n")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("locksmith execution error: %w", err)
 	}
 
-	return "", errors.New("key not found in locksmith")
+	val := strings.TrimSpace(string(out))
+	if val == "" || strings.HasPrefix(val, "Error:") || strings.Contains(val, "Secret not found") {
+		return "", fmt.Errorf("secret %q not found in locksmith vault", key)
+	}
+
+	return val, nil
 }
 
 func getFromGH(ctx context.Context) (string, error) {

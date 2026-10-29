@@ -13,69 +13,26 @@ func resetHooks() {
 	execCommand = exec.CommandContext
 }
 
-func TestGetGitHubToken_GitHubTokenEnv(t *testing.T) {
+func TestGetGitHubToken_LocksmithDefaultKey(t *testing.T) {
 	defer resetHooks()
 
-	t.Setenv("GITHUB_TOKEN", "ghp_from_github_token")
-	t.Setenv("GH_TOKEN", "")
+	// Ensure environment variables are NOT used
+	t.Setenv("GITHUB_TOKEN", "should_be_ignored")
+	t.Setenv("GH_TOKEN", "should_be_ignored")
 
-	token, err := GetGitHubToken(context.Background())
-	if err != nil {
-		t.Fatalf("expected no error, got: %v", err)
-	}
-	if token != "ghp_from_github_token" {
-		t.Fatalf("expected ghp_from_github_token, got: %s", token)
-	}
-}
-
-func TestGetGitHubToken_GHTokenEnv(t *testing.T) {
-	defer resetHooks()
-
-	t.Setenv("GITHUB_TOKEN", "")
-	t.Setenv("GH_TOKEN", "ghp_from_gh_token")
-
-	token, err := GetGitHubToken(context.Background())
-	if err != nil {
-		t.Fatalf("expected no error, got: %v", err)
-	}
-	if token != "ghp_from_gh_token" {
-		t.Fatalf("expected ghp_from_gh_token, got: %s", token)
-	}
-}
-
-func TestGetGitHubToken_EnvPrecedence(t *testing.T) {
-	defer resetHooks()
-
-	t.Setenv("GITHUB_TOKEN", "ghp_primary")
-	t.Setenv("GH_TOKEN", "ghp_secondary")
-
-	token, err := GetGitHubToken(context.Background())
-	if err != nil {
-		t.Fatalf("expected no error, got: %v", err)
-	}
-	if token != "ghp_primary" {
-		t.Fatalf("expected ghp_primary, got: %s", token)
-	}
-}
-
-func TestGetGitHubToken_LocksmithProvider(t *testing.T) {
-	defer resetHooks()
-
-	t.Setenv("GITHUB_TOKEN", "")
-	t.Setenv("GH_TOKEN", "")
-
+	var invokedKey string
 	lookPath = func(file string) (string, error) {
 		if file == "locksmith" {
-			return "/usr/local/bin/locksmith", nil
+			return "/opt/homebrew/bin/locksmith", nil
 		}
 		return "", errors.New("not found")
 	}
 
 	execCommand = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		// Mock exec helper by echoing expected token
-		cs := []string{"-test.run=TestHelperProcess", "--", "locksmith", args[1]}
+		invokedKey = args[1] // locksmith get <key> -n
+		cs := []string{"-test.run=TestHelperProcess", "--", "locksmith"}
 		cmd := exec.Command(os.Args[0], cs...)
-		cmd.Env = []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_TOKEN=ghp_from_locksmith_vault"}
+		cmd.Env = []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_TOKEN=gho_from_locksmith_gh_read"}
 		return cmd
 	}
 
@@ -83,16 +40,47 @@ func TestGetGitHubToken_LocksmithProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
-	if token != "ghp_from_locksmith_vault" {
-		t.Fatalf("expected ghp_from_locksmith_vault, got: %s", token)
+	if token != "gho_from_locksmith_gh_read" {
+		t.Fatalf("expected gho_from_locksmith_gh_read, got: %s", token)
+	}
+	if invokedKey != DefaultLocksmithKey {
+		t.Fatalf("expected default key %s, got: %s", DefaultLocksmithKey, invokedKey)
 	}
 }
 
-func TestGetGitHubToken_GHCLIFallback(t *testing.T) {
+func TestGetGitHubToken_LocksmithCustomKey(t *testing.T) {
 	defer resetHooks()
 
-	t.Setenv("GITHUB_TOKEN", "")
-	t.Setenv("GH_TOKEN", "")
+	var invokedKey string
+	lookPath = func(file string) (string, error) {
+		if file == "locksmith" {
+			return "/opt/homebrew/bin/locksmith", nil
+		}
+		return "", errors.New("not found")
+	}
+
+	execCommand = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		invokedKey = args[1]
+		cs := []string{"-test.run=TestHelperProcess", "--", "locksmith"}
+		cmd := exec.Command(os.Args[0], cs...)
+		cmd.Env = []string{"GO_WANT_HELPER_PROCESS=1", "MOCK_TOKEN=gho_custom_key_val"}
+		return cmd
+	}
+
+	token, err := GetGitHubToken(context.Background(), TokenOptions{LocksmithKey: "MY_CUSTOM_KEY"})
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if token != "gho_custom_key_val" {
+		t.Fatalf("expected gho_custom_key_val, got: %s", token)
+	}
+	if invokedKey != "MY_CUSTOM_KEY" {
+		t.Fatalf("expected key MY_CUSTOM_KEY, got: %s", invokedKey)
+	}
+}
+
+func TestGetGitHubToken_GHCLIFallbackWhenNoLocksmith(t *testing.T) {
+	defer resetHooks()
 
 	lookPath = func(file string) (string, error) {
 		if file == "gh" {
@@ -119,9 +107,6 @@ func TestGetGitHubToken_GHCLIFallback(t *testing.T) {
 
 func TestGetGitHubToken_NoTokenFound(t *testing.T) {
 	defer resetHooks()
-
-	t.Setenv("GITHUB_TOKEN", "")
-	t.Setenv("GH_TOKEN", "")
 
 	lookPath = func(file string) (string, error) {
 		return "", errors.New("command not found")
