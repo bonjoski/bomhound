@@ -16,6 +16,7 @@ output-*/
 
 # Cache directories
 .bomhound-cache/
+.bomhound-cache.json
 
 # OS and Editor files
 .DS_Store

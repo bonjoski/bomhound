@@ -25,7 +25,7 @@ A high-performance CLI tool and Go library for enriching Software Bill of Materi
 
 ### Prerequisites
 - Go 1.21 or later
-- GitHub Personal Access Token (provided via `GITHUB_TOKEN` environment variable or system keyring)
+- GitHub Personal Access Token (provided via `GITHUB_TOKEN`, [Locksmith](https://github.com/bonjoski/locksmith) vault, or `gh auth login`)
 
 ### Homebrew (macOS & Linux)
 ```bash
@@ -88,8 +88,7 @@ Flags:
       --min-coverage float       Minimum copyright coverage percentage required (default 0)
       --fail-on-missing          Exit with code 5 if any non-excluded component is missing copyright
       --config string            Path to custom .bomhound.yaml configuration file
-      --token-stdin              Read GitHub API token from standard input
-      --reset-token              Clear stored GitHub credentials from the system keyring
+      --locksmith-key string     Key name for GitHub token in Locksmith vault (default "GITHUB_TOKEN")
 ```
 
 ---
@@ -155,7 +154,7 @@ func main() {
 
 ## Security & Hardening
 
-- **Credential Isolation**: GitHub tokens are never logged or stored in world-readable files. Headless CI detects non-interactive terminals and fails gracefully with `ErrTokenNotFoundInCI` instead of blocking indefinitely on prompts.
+- **Credential Isolation**: GitHub tokens are never logged or stored in plain-text files. The authentication resolver supports standard environment variables (`GITHUB_TOKEN`), [Locksmith](https://github.com/bonjoski/locksmith) biometric vault integration, and `gh auth token` CLI fallback.
 - **SSRF Mitigation**: Custom HTTP dialer enforces RFC 1918, RFC 3927, and RFC 4291 network boundaries, protecting against server-side request forgery when fetching Go vanity meta tags.
 - **Denial-of-Service Protection**: All external response bodies are bounded by `io.LimitReader` (2MB max) to eliminate memory exhaustion from malicious redirects or responses.
 - **Atomic File Writing**: File writes use temporary files and atomic `os.Rename` with strict permission bits (`0600` / `0644`), preventing partial writes and symlink destination hijacking.

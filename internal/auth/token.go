@@ -1,39 +1,36 @@
 package auth
 
 import (
+	"context"
 	"errors"
-	"fmt"
 	"os"
+	"os/exec"
 	"strings"
-
-	"github.com/zalando/go-keyring"
-	"golang.org/x/term"
-)
-
-const (
-	serviceName = "bomhound"
-	userName    = "github-token"
+	"time"
 )
 
 var (
-	// ErrTokenNotFoundInCI is returned when no token env var is set in a non-terminal (CI/headless) environment.
-	ErrTokenNotFoundInCI = errors.New("GitHub token not found: please set GITHUB_TOKEN or GH_TOKEN environment variable in CI/headless environments")
-	// ErrEmptyToken is returned when an entered token is blank.
-	ErrEmptyToken = errors.New("token cannot be empty")
+	// ErrNoTokenFound is returned when no token could be discovered from environment, Locksmith, or gh CLI.
+	ErrNoTokenFound = errors.New("GitHub token not found. Please provide a token via GITHUB_TOKEN environment variable, Locksmith ('locksmith add GITHUB_TOKEN'), or GitHub CLI ('gh auth login')")
 )
 
-// Internal hooks for testing
+// TokenOptions configures token discovery.
+type TokenOptions struct {
+	LocksmithKey string
+}
+
+// Internal hooks for testing and mocking external commands
 var (
-	isTerminal    = term.IsTerminal
-	readPassword  = term.ReadPassword
-	keyringGet    = keyring.Get
-	keyringSet    = keyring.Set
-	keyringDelete = keyring.Delete
+	execCommand = exec.CommandContext
+	lookPath    = exec.LookPath
 )
 
-// GetGitHubToken retrieves the GitHub token from environment variables, keyring, or interactive prompt.
-func GetGitHubToken() (string, error) {
-	// a) Check GITHUB_TOKEN or GH_TOKEN env vars
+// GetGitHubToken retrieves the GitHub token using the standard resolution chain:
+// 1. GITHUB_TOKEN or GH_TOKEN environment variables
+// 2. Locksmith secrets vault (if installed in PATH)
+// 3. GitHub CLI (`gh auth token`, if installed in PATH)
+func GetGitHubToken(ctx context.Context, opts ...TokenOptions) (string, error) {
+	// 1. Check environment variables (standard for CI/CD and scripts)
 	if token := strings.TrimSpace(os.Getenv("GITHUB_TOKEN")); token != "" {
 		return token, nil
 	}
@@ -41,45 +38,71 @@ func GetGitHubToken() (string, error) {
 		return token, nil
 	}
 
-	// b) Check if stdin is a terminal
-	stdinFd := int(os.Stdin.Fd())
-	if !isTerminal(stdinFd) {
-		// d) Non-terminal / CI headless environment
-		return "", ErrTokenNotFoundInCI
+	locksmithKey := "GITHUB_TOKEN"
+	if len(opts) > 0 && opts[0].LocksmithKey != "" {
+		locksmithKey = opts[0].LocksmithKey
 	}
 
-	// c) Terminal: check keyring
-	token, err := keyringGet(serviceName, userName)
-	if err == nil && strings.TrimSpace(token) != "" {
-		return strings.TrimSpace(token), nil
+	// 2. Attempt Locksmith hardware-bound secret checkout
+	if token, err := getFromLocksmith(ctx, locksmithKey); err == nil && token != "" {
+		return token, nil
 	}
 
-	// Not in keyring, prompt interactively
-	fmt.Print("GitHub Token not found in keyring.\n")
-	fmt.Print("Please enter your GitHub Token (input will be hidden): ")
-
-	byteToken, err := readPassword(stdinFd)
-	if err != nil {
-		return "", fmt.Errorf("failed to read password: %w", err)
-	}
-	fmt.Println() // Print a newline after input
-
-	token = strings.TrimSpace(string(byteToken))
-	if token == "" {
-		return "", ErrEmptyToken
+	// 3. Attempt GitHub CLI (gh auth token)
+	if token, err := getFromGH(ctx); err == nil && token != "" {
+		return token, nil
 	}
 
-	// Save to keyring
-	err = keyringSet(serviceName, userName, token)
-	if err != nil {
-		return "", fmt.Errorf("failed to save token to keyring: %w", err)
-	}
-
-	fmt.Println("Token saved to keyring.")
-	return token, nil
+	return "", ErrNoTokenFound
 }
 
-// ClearToken removes the token from the keyring (useful for testing or resetting).
-func ClearToken() error {
-	return keyringDelete(serviceName, userName)
+func getFromLocksmith(ctx context.Context, key string) (string, error) {
+	path, err := lookPath("locksmith")
+	if err != nil {
+		return "", err
+	}
+
+	// Try primary key, then common fallbacks if default GITHUB_TOKEN
+	keysToTry := []string{key}
+	if key == "GITHUB_TOKEN" {
+		keysToTry = []string{"GITHUB_TOKEN", "github_token", "GH_TOKEN", "GH-Read"}
+	}
+
+	timeoutCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+
+	for _, k := range keysToTry {
+		cmd := execCommand(timeoutCtx, path, "get", k, "-n")
+		out, err := cmd.Output()
+		if err == nil {
+			val := strings.TrimSpace(string(out))
+			if val != "" && !strings.HasPrefix(val, "Error:") && !strings.Contains(val, "Secret not found") {
+				return val, nil
+			}
+		}
+	}
+
+	return "", errors.New("key not found in locksmith")
+}
+
+func getFromGH(ctx context.Context) (string, error) {
+	path, err := lookPath("gh")
+	if err != nil {
+		return "", err
+	}
+
+	timeoutCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+
+	cmd := execCommand(timeoutCtx, path, "auth", "token")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+
+	val := strings.TrimSpace(string(out))
+	if val != "" {
+		return val, nil
+	}
+	return "", errors.New("empty token from gh")
 }

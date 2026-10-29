@@ -25,11 +25,11 @@ func main() {
 		Level: slog.LevelInfo,
 	})))
 
-	resetToken := flag.Bool("reset-token", false, "Reset the GitHub token in the keyring")
 	outputDir := flag.String("output-dir", "output", "Directory to save enriched SBOMs")
 	inPlace := flag.Bool("in-place", false, "Overwrite input SBOM files in-place")
 	concurrency := flag.Int("concurrency", 5, "Number of concurrent workers")
 	configPath := flag.String("config", "", "Path to configuration file (.bomhound.yaml)")
+	locksmithKey := flag.String("locksmith-key", "GITHUB_TOKEN", "Key name for GitHub token in Locksmith vault")
 	showVersion := flag.Bool("version", false, "Print version information and exit")
 	flag.BoolVar(showVersion, "v", false, "Print version information and exit (shorthand)")
 	flag.Parse()
@@ -55,19 +55,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Handle token reset
-	if *resetToken {
-		if err := auth.ClearToken(); err != nil {
-			slog.Warn("Failed to clear token from keyring", "error", err)
-		} else {
-			slog.Info("Token cleared from keyring. You will be prompted to enter a new one.")
-		}
-	}
+	// Get GitHub Token (supports environment variables, Locksmith vault, and gh CLI)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	// Get GitHub Token
-	token, err := auth.GetGitHubToken()
+	token, err := auth.GetGitHubToken(ctx, auth.TokenOptions{LocksmithKey: *locksmithKey})
 	if err != nil {
-		slog.Error("Error getting GitHub token", "error", err)
+		slog.Error("Authentication failed", "error", err)
 		os.Exit(2)
 	}
 
@@ -97,7 +91,6 @@ func main() {
 
 	// Initialize Enricher
 	e := enricher.NewEnricher(finder, res, *concurrency, c, cfg)
-	ctx := context.Background()
 
 	// 1. Process STDIN Stream Mode (UNIX Pipe)
 	if isStdin {
