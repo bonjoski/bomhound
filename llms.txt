@@ -1,16 +1,18 @@
 # Bomhound
 
-> CycloneDX SBOM Legal Attribution & Multi-Author Copyright Engine (Apache-2.0 §4c / 17 U.S.C. § 1202).
+> High-performance CLI and Go library for enriching CycloneDX SBOMs with unabridged copyright notices and legal attribution (Apache 2.0 §4c / 17 U.S.C. § 1202).
 
 ## Core Capabilities
-- Multi-Author Copyright Extraction: Parses license and notice files from upstream dependencies, extracting unabridged copyright lines and multi-author notices.
-- CycloneDX Compliant: Uses official `cyclonedx-go` serializers to populate standardized `Evidence.Copyright` schemas without destroying existing SBOM properties.
-- Vanity Domain Resolution: Resolves Go vanity imports (`k8s.io/*`, `golang.org/x/*`, `gopkg.in/*`) back to canonical git repositories.
+- Legal Attribution Compliance: Solves Apache 2.0 §4c and 17 U.S.C. § 1202 by preserving unabridged author copyright statements.
+- CycloneDX Standards Compliant: Uses official `cyclonedx-go` serializers to emit standardized `Evidence.Copyright` structures.
+- Vanity URL Resolution: Maps Go vanity domains (`k8s.io/*`, `golang.org/x/*`, `gopkg.in/*`) and NPM registries back to true git repositories.
+- Content-Addressed Local Cache: Eliminates network rate limits with local SHA-256 license caching.
 
 ## CLI Usage
-- `bomhound enrich --input sbom.json --output sbom.enriched.json`: Enriches an SBOM with legal notices.
-- `bomhound enrich --in-place sbom.json`: Enriches in place.
-- `bomhound verify --input sbom.json`: Checks that all components possess valid copyright evidence.
+- `bomhound enrich --input <sbom.json> --output <enriched.json>`: Injects legal copyright notices into CycloneDX SBOM.
+- `bomhound resolve --domain <package>`: Resolves custom vanity domain to upstream git repository.
+- `bomhound parse --file <license-file>`: Parses raw license file and extracts author lines.
 
-## Documentation
-- Documentation: `docs/knowledge-base/10-bomhound.md` in repo `spanreed`
+## Key Files & Paths
+- Local Cache: `~/.bomhound/cache/`
+- Parent Runbook: `docs/knowledge-base/10-bomhound.md` in repository `spanreed`
