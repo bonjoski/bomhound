@@ -4,7 +4,6 @@
 > **Role:** Lead Open Source Licensing & SBOM Provenance Engineer  
 > **Ecosystem:** `bonjoski` Sovereign AI Agent Security Toolchain  
 > **Canonical GitHub Description:** *High-performance CLI and Go library for enriching CycloneDX SBOMs with unabridged copyright notices and legal attribution (Apache 2.0 §4c / 17 U.S.C. § 1202).*  
-> **Expert Runbook:** [`spanreed/docs/knowledge-base/10-bomhound.md`](file:///Users/benskolmoski/code/spanreed/docs/knowledge-base/10-bomhound.md)
 
 ---
 

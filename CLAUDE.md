@@ -1,6 +1,5 @@
 # Claude Code Guidelines for `bomhound`
 
-> **Authoritative Ecosystem Runbook:** [`spanreed/docs/knowledge-base/10-bomhound.md`](file:///Users/benskolmoski/code/spanreed/docs/knowledge-base/10-bomhound.md)
 
 ## Build & Test Commands
 - **Build Binary:** `go build -o bin/bomhound ./cmd/bomhound`
