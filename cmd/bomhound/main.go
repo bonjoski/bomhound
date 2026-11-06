@@ -33,6 +33,19 @@ func main() {
 	tokenStdin := flag.Bool("token-stdin", false, "Read GitHub token from standard input")
 	showVersion := flag.Bool("version", false, "Print version information and exit")
 	flag.BoolVar(showVersion, "v", false, "Print version information and exit (shorthand)")
+
+	flag.CommandLine.SetOutput(os.Stdout)
+	flag.Usage = func() {
+		fmt.Println(`bomhound — High-performance CycloneDX SBOM Legal Attribution Engine
+
+Usage:
+  bomhound [flags] <sbom-file-or-dir>
+  cat sbom.json | bomhound [flags] > enriched.json
+
+Flags:`)
+		flag.PrintDefaults()
+	}
+
 	flag.Parse()
 
 	if *showVersion {
@@ -41,6 +54,14 @@ func main() {
 	}
 
 	args := flag.Args()
+	if len(args) > 0 && args[0] == "version" {
+		fmt.Printf("bomhound %s\n", bomhound.FormattedVersion())
+		os.Exit(0)
+	}
+	if len(args) > 0 && args[0] == "help" {
+		flag.Usage()
+		os.Exit(0)
+	}
 	filePath := "."
 	if len(args) > 0 {
 		filePath = args[0]
