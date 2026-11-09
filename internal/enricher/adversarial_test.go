@@ -159,3 +159,38 @@ func TestAdversarial_CircuitBreakerErrorPropagation(t *testing.T) {
 		t.Errorf("Expected FailedCopyright to reflect rate limit error, got: %d", stats.FailedCopyright)
 	}
 }
+
+// TestAdversarial_BMH06_BatchRateLimitShortCircuit verifies that when GitHub returns
+// ErrRateLimitExceeded (429/403), EnrichBOM immediately trips the batch circuit breaker
+// and aborts remaining network lookups instead of hammering the upstream API.
+func TestAdversarial_BMH06_BatchRateLimitShortCircuit(t *testing.T) {
+	bom := cdx.NewBOM()
+	var components []cdx.Component
+	for i := 0; i < 200; i++ {
+		components = append(components, cdx.Component{
+			Name:       fmt.Sprintf("comp-%d", i),
+			PackageURL: fmt.Sprintf("pkg:github/org/repo-%d@v1.0.0", i),
+			Type:       "library",
+		})
+	}
+	bom.Components = &components
+
+	finder := &AdversarialFinder{
+		failOnCount:   1,
+		returnedError: copyright.ErrRateLimitExceeded,
+	}
+	resolver := &MockResolver{results: make(map[string]string)}
+	e := NewEnricher(finder, resolver, 4, cache.New(), config.DefaultConfig())
+
+	stats, err := e.EnrichBOM(context.Background(), bom)
+	if err != nil {
+		t.Fatalf("EnrichBOM returned unexpected error: %v", err)
+	}
+	if stats.Missing != 200 {
+		t.Fatalf("Expected all 200 components marked missing after immediate rate limit, got %d", stats.Missing)
+	}
+	calls := atomic.LoadInt64(&finder.callCount)
+	if calls >= 50 {
+		t.Fatalf("BMH-06 regression: circuit breaker did not short-circuit batch (made %d/200 API calls)", calls)
+	}
+}

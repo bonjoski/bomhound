@@ -2,14 +2,17 @@ package enricher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	cdx "github.com/CycloneDX/cyclonedx-go"
 	"github.com/bonjoski/bomhound/internal/cache"
 	"github.com/bonjoski/bomhound/internal/config"
+	"github.com/bonjoski/bomhound/internal/copyright"
 	"github.com/bonjoski/bomhound/internal/parser"
 )
 
@@ -138,6 +141,9 @@ func (e *Enricher) EnrichBOM(ctx context.Context, bom *cdx.BOM) (*Stats, error) 
 
 	jobs := make(chan int, componentsCount)
 	var wg sync.WaitGroup
+	var circuitTripped atomic.Bool
+	enrichCtx, cancelEnrich := context.WithCancel(ctx)
+	defer cancelEnrich()
 
 	for w := 0; w < e.Workers; w++ {
 		wg.Add(1)
@@ -152,8 +158,20 @@ func (e *Enricher) EnrichBOM(ctx context.Context, bom *cdx.BOM) (*Stats, error) 
 						return
 					}
 
+					if circuitTripped.Load() {
+						statsMu.Lock()
+						missing++
+						failedCopyright++
+						statsMu.Unlock()
+						continue
+					}
+
 					comp := &(*bom.Components)[idx]
-					notices, category, err := e.processComponentWithCategory(ctx, comp)
+					notices, category, err := e.processComponentWithCategory(enrichCtx, comp)
+					if errors.Is(err, copyright.ErrRateLimitExceeded) || errors.Is(err, copyright.ErrAuthenticationFailed) {
+						circuitTripped.Store(true)
+						cancelEnrich()
+					}
 
 					statsMu.Lock()
 					if err != nil {

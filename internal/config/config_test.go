@@ -154,68 +154,51 @@ func TestLoadConfig_SearchHierarchy(t *testing.T) {
 	}
 	defer os.Chdir(origWd)
 
-	// Test 1: Found in current directory as .bomhound.yaml
+	// Test 1: Untrusted .bomhound.yaml in current directory MUST NOT auto-load (BMH-04)
 	{
 		tmpDir := t.TempDir()
+		fakeHome := filepath.Join(tmpDir, "fakehome")
+		t.Setenv("HOME", fakeHome)
 		cfgFile := filepath.Join(tmpDir, ".bomhound.yaml")
-		_ = os.WriteFile(cfgFile, []byte("version: \"current-yaml\"\n"), 0644)
+		_ = os.WriteFile(cfgFile, []byte("version: \"untrusted-cwd-yaml\"\n"), 0644)
 		_ = os.Chdir(tmpDir)
-
-		cfg, err := LoadConfig("")
-		if err != nil || cfg.Version != "current-yaml" {
-			t.Errorf("failed to load .bomhound.yaml in current dir: err=%v, version=%s", err, cfg.Version)
-		}
-	}
-
-	// Test 2: Found in current directory as .bomhound.yml
-	{
-		tmpDir := t.TempDir()
-		cfgFile := filepath.Join(tmpDir, ".bomhound.yml")
-		_ = os.WriteFile(cfgFile, []byte("version: \"current-yml\"\n"), 0644)
-		_ = os.Chdir(tmpDir)
-
-		cfg, err := LoadConfig("")
-		if err != nil || cfg.Version != "current-yml" {
-			t.Errorf("failed to load .bomhound.yml in current dir: err=%v, version=%s", err, cfg.Version)
-		}
-	}
-
-	// Test 3: Found 3 levels up
-	{
-		tmpDir := t.TempDir()
-		// Structure: tmpDir/.bomhound.yaml
-		// Sub: tmpDir/l1/l2/l3
-		l3Dir := filepath.Join(tmpDir, "l1", "l2", "l3")
-		_ = os.MkdirAll(l3Dir, 0755)
-		_ = os.WriteFile(filepath.Join(tmpDir, ".bomhound.yaml"), []byte("version: \"level-3-up\"\n"), 0644)
-		_ = os.Chdir(l3Dir)
-
-		cfg, err := LoadConfig("")
-		if err != nil || cfg.Version != "level-3-up" {
-			t.Errorf("failed to load config 3 levels up: err=%v, version=%v", err, cfg)
-		}
-	}
-
-	// Test 4: NOT found 4 levels up (only checks up to 3 levels)
-	{
-		tmpDir := t.TempDir()
-		l4Dir := filepath.Join(tmpDir, "l1", "l2", "l3", "l4")
-		_ = os.MkdirAll(l4Dir, 0755)
-		_ = os.WriteFile(filepath.Join(tmpDir, ".bomhound.yaml"), []byte("version: \"level-4-up\"\n"), 0644)
-		_ = os.Chdir(l4Dir)
-		t.Setenv("HOME", filepath.Join(tmpDir, "fakehome"))
 
 		cfg, err := LoadConfig("")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		// Should fall back to default ("1") since 4 levels up is beyond 3
-		if cfg.Version == "level-4-up" {
-			t.Errorf("should not have loaded config 4 levels up")
+		if cfg.Version == "untrusted-cwd-yaml" {
+			t.Fatalf("BMH-04 regression: untrusted CWD .bomhound.yaml was auto-loaded without --config!")
+		}
+
+		// Explicit --config path must still load
+		explicitCfg, err := LoadConfig(cfgFile)
+		if err != nil || explicitCfg.Version != "untrusted-cwd-yaml" {
+			t.Errorf("failed to load explicit .bomhound.yaml: err=%v, version=%v", err, explicitCfg)
 		}
 	}
 
-	// Test 5: Found in ~/.config/bomhound/config.yaml
+	// Test 2: Untrusted .bomhound.yml in parent directories MUST NOT auto-load (BMH-04)
+	{
+		tmpDir := t.TempDir()
+		fakeHome := filepath.Join(tmpDir, "fakehome")
+		t.Setenv("HOME", fakeHome)
+		l3Dir := filepath.Join(tmpDir, "l1", "l2", "l3")
+		_ = os.MkdirAll(l3Dir, 0755)
+		_ = os.WriteFile(filepath.Join(tmpDir, ".bomhound.yaml"), []byte("version: \"level-3-up\"\n"), 0644)
+		_ = os.WriteFile(filepath.Join(l3Dir, ".bomhound.yml"), []byte("version: \"current-yml\"\n"), 0644)
+		_ = os.Chdir(l3Dir)
+
+		cfg, err := LoadConfig("")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Version != "1" {
+			t.Fatalf("BMH-04 regression: untrusted workspace/parent config auto-loaded: version=%q", cfg.Version)
+		}
+	}
+
+	// Test 3: Trusted ~/.config/bomhound/config.yaml DOES auto-load
 	{
 		tmpDir := t.TempDir()
 		workDir := filepath.Join(tmpDir, "work")

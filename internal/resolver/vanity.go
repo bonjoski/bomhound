@@ -1,14 +1,16 @@
 package resolver
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
-	"time"
 
-	"github.com/bonjoski/bomhound/internal/safehttp"
+	"github.com/bonjoski/bomhound/internal/copyright"
+	"golang.org/x/mod/module"
 )
 
 // Common Go vanity URL mappings
@@ -35,51 +37,55 @@ var specialMappings = map[string]string{
 	"gopkg.in/inf.v0":            "github.com/go-inf/inf",
 }
 
-// ResolveGoVanityURL attempts to resolve a Go vanity URL to its GitHub repository
+// ResolveGoVanityURL attempts to resolve a Go vanity URL to its GitHub repository purely offline.
 func ResolveGoVanityURL(importPath string) (string, bool) {
-	// Remove version suffix if present (e.g., /v2, /v3)
 	cleanPath := importPath
 	if idx := strings.LastIndex(importPath, "/v"); idx != -1 {
-		// Check if what follows is a version number
 		suffix := importPath[idx+2:]
 		if len(suffix) > 0 && suffix[0] >= '0' && suffix[0] <= '9' {
 			cleanPath = importPath[:idx]
 		}
 	}
 
-	// Check special mappings first (exact match)
 	if repo, ok := specialMappings[cleanPath]; ok {
 		return repo, true
 	}
 
-	// Check prefix mappings
-	for vanity, github := range vanityMappings {
+	for vanity, gh := range vanityMappings {
 		if strings.HasPrefix(importPath, vanity) {
-			// Extract the package name after the vanity prefix
 			pkgName := strings.TrimPrefix(importPath, vanity)
-			// Remove any sub-paths, keep only the repo name
 			if idx := strings.Index(pkgName, "/"); idx != -1 {
 				pkgName = pkgName[:idx]
 			}
-			return github + pkgName, true
+			if !copyright.IsValidGitHubSegment(pkgName) {
+				return "", false
+			}
+			return gh + pkgName, true
 		}
 	}
 
 	return "", false
 }
 
-// goImportMetaRegex matches go-import meta tags
-var goImportMetaRegex = regexp.MustCompile(`<meta\s+name="go-import"\s+content="([^"]+)"`)
+// goImportMetaRegex matches go-import meta tags.
+var goImportMetaRegex = regexp.MustCompile(`(?i)<meta\s+name=["']go-import["']\s+content=["']([^"']+)["']`)
 
-// FetchGoImportMeta fetches the go-import meta tag from a vanity URL
+// FetchGoImportMeta fetches and validates the go-import meta tag from a Go vanity module path.
 func FetchGoImportMeta(importPath string) (string, error) {
-	// Construct the URL to fetch
-	url := "https://" + importPath + "?go-get=1"
+	trimmed := strings.TrimSpace(importPath)
+	if idx := strings.Index(trimmed, "@"); idx != -1 {
+		trimmed = trimmed[:idx]
+	}
+	if err := module.CheckPath(trimmed); err != nil {
+		return "", fmt.Errorf("invalid Go module path %q: %w", trimmed, err)
+	}
 
-	// Create SSRF-guarded HTTP client with timeout
-	client := safehttp.NewSafeHTTPClient(10 * time.Second)
+	reqURL, err := url.Parse("https://" + trimmed + "?go-get=1")
+	if err != nil || reqURL.User != nil || reqURL.RawQuery != "go-get=1" || reqURL.Fragment != "" || reqURL.Hostname() == "" {
+		return "", fmt.Errorf("malformed vanity lookup URL for %q", trimmed)
+	}
 
-	resp, err := client.Get(url)
+	resp, err := defaultHTTPClient.Get(reqURL.String())
 	if err != nil {
 		return "", fmt.Errorf("fetching go-import meta: %w", err)
 	}
@@ -89,38 +95,65 @@ func FetchGoImportMeta(importPath string) (string, error) {
 		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
-	// Limit response body size to prevent DoS
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024)) // 1MB limit
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if err != nil {
 		return "", fmt.Errorf("reading response: %w", err)
 	}
 
-	// Find the go-import meta tag
-	matches := goImportMetaRegex.FindStringSubmatch(string(body))
-	if len(matches) < 2 {
-		return "", fmt.Errorf("no go-import meta tag found")
+	allMatches := goImportMetaRegex.FindAllStringSubmatch(string(body), -1)
+	if len(allMatches) == 0 {
+		return "", errors.New("no go-import meta tag found")
 	}
 
-	// Parse the content: "import-prefix vcs repo-root"
-	parts := strings.Fields(matches[1])
-	if len(parts) < 3 {
-		return "", fmt.Errorf("invalid go-import content")
-	}
+	for _, match := range allMatches {
+		if len(match) < 2 {
+			continue
+		}
+		parts := strings.Fields(match[1])
+		if len(parts) != 3 {
+			continue
+		}
+		importPrefix, repoRaw := parts[0], parts[2]
+		// Verify meta prefix matches queried module path on a '/' boundary.
+		if trimmed != importPrefix && !strings.HasPrefix(trimmed, importPrefix+"/") {
+			continue
+		}
 
-	repoURL := parts[2]
-
-	// Extract github.com/owner/repo from the URL
-	if strings.Contains(repoURL, "github.com") {
-		// Clean up the URL
-		repoURL = strings.TrimPrefix(repoURL, "https://")
-		repoURL = strings.TrimPrefix(repoURL, "http://")
-		repoURL = strings.TrimSuffix(repoURL, ".git")
-
-		// Extract github.com/owner/repo
-		if idx := strings.Index(repoURL, "github.com/"); idx != -1 {
-			return repoURL[idx:], nil
+		ghRepo, ok := extractExactGitHubRepo(repoRaw)
+		if ok {
+			return ghRepo, nil
 		}
 	}
 
-	return "", fmt.Errorf("not a GitHub repository")
+	return "", errors.New("no matching GitHub go-import repository found")
+}
+
+func extractExactGitHubRepo(rawURL string) (string, bool) {
+	cleaned := strings.TrimSpace(rawURL)
+	cleaned = strings.TrimPrefix(cleaned, "git+")
+	if strings.HasPrefix(cleaned, "ssh://git@github.com/") {
+		cleaned = "https://github.com/" + strings.TrimPrefix(cleaned, "ssh://git@github.com/")
+	}
+
+	u, err := url.Parse(cleaned)
+	if err != nil || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return "", false
+	}
+	if u.Scheme != "https" && u.Scheme != "http" && u.Scheme != "git" {
+		return "", false
+	}
+	if !strings.EqualFold(u.Hostname(), "github.com") {
+		return "", false
+	}
+
+	trimmedPath := strings.Trim(strings.TrimSuffix(u.Path, ".git"), "/")
+	segs := strings.Split(trimmedPath, "/")
+	if len(segs) < 2 {
+		return "", false
+	}
+	owner, repo := segs[0], segs[1]
+	if !copyright.IsValidGitHubSegment(owner) || !copyright.IsValidGitHubSegment(repo) {
+		return "", false
+	}
+	return "github.com/" + owner + "/" + repo, true
 }

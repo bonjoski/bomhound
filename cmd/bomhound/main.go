@@ -29,6 +29,7 @@ func main() {
 	inPlace := flag.Bool("in-place", false, "Overwrite input SBOM files in-place")
 	concurrency := flag.Int("concurrency", 5, "Number of concurrent workers")
 	configPath := flag.String("config", "", "Path to configuration file (.bomhound.yaml)")
+	cacheFlag := flag.String("cache", "", "Path to cache JSON file (defaults to ~/.cache/bomhound/cache.json)")
 	locksmithKey := flag.String("locksmith-key", "", "Key name for GitHub token in Locksmith vault (overrides config)")
 	tokenStdin := flag.Bool("token-stdin", false, "Read GitHub token from standard input")
 	showVersion := flag.Bool("version", false, "Print version information and exit")
@@ -69,6 +70,10 @@ Flags:`)
 
 	// Detect if input should be read from STDIN (pipe mode)
 	isStdin := filePath == "-" || (len(args) == 0 && !term.IsTerminal(int(os.Stdin.Fd())))
+	if err := auth.ValidateStdinMode(*tokenStdin, isStdin); err != nil {
+		slog.Error("Invalid standard input flags", "error", err)
+		os.Exit(1)
+	}
 
 	// Load configuration
 	cfg, err := config.LoadConfig(*configPath)
@@ -105,15 +110,20 @@ Flags:`)
 			slog.Warn("Failed to initialize cache directory", "dir", cfg.Cache.Dir, "error", err)
 		}
 	}
-	cachePath := ".bomhound-cache.json"
-	if err := c.Load(cachePath); err != nil {
-		slog.Warn("Failed to load local cache", "error", err)
+	cachePath := *cacheFlag
+	if cachePath == "" && cfg.Cache.Dir != "" {
+		cachePath = filepath.Join(cfg.Cache.Dir, "cache.json")
 	}
-	defer func() {
-		if err := c.Save(cachePath); err != nil {
-			slog.Error("Failed to save cache", "error", err)
+	if cachePath != "" {
+		if err := c.Load(cachePath); err != nil {
+			slog.Warn("Failed to load local cache", "error", err)
 		}
-	}()
+		defer func() {
+			if err := c.Save(cachePath); err != nil {
+				slog.Error("Failed to save cache", "error", err)
+			}
+		}()
+	}
 
 	// Initialize Dependencies
 	finder := copyright.NewFinder(token)

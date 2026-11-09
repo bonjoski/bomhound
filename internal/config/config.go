@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -10,6 +11,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+const maxConfigBytes = 1 << 20 // 1 MiB max configuration file size
 
 // Config represents the configuration for bomhound.
 type Config struct {
@@ -70,10 +73,9 @@ func DefaultConfig() *Config {
 	}
 }
 
-// LoadConfig loads the configuration from path or default locations.
-// If path is empty, it searches for .bomhound.yaml, .bomhound.yml in the current directory,
-// upwards up to 3 levels, or ~/.config/bomhound/config.yaml.
-// If no configuration file is found, DefaultConfig() is returned without error.
+// LoadConfig loads the configuration from an explicit path (--config) or trusted user directory
+// (~/.config/bomhound/config.{yaml,yml}). Untrusted CWD or parent-directory .bomhound.yaml files
+// are never auto-loaded when pathStr is empty.
 func LoadConfig(pathStr string) (*Config, error) {
 	var configPath string
 
@@ -86,15 +88,24 @@ func LoadConfig(pathStr string) (*Config, error) {
 			}
 		}
 	} else {
-		configPath = findConfigFile()
+		configPath = findTrustedConfigFile()
 		if configPath == "" {
 			return DefaultConfig(), nil
 		}
 	}
 
-	data, err := os.ReadFile(configPath)
+	f, err := os.Open(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading config file %s: %w", configPath, err)
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxConfigBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("reading config file %s: %w", configPath, err)
+	}
+	if len(data) > maxConfigBytes {
+		return nil, fmt.Errorf("config file %s exceeds %d byte limit", configPath, maxConfigBytes)
 	}
 
 	cfg := DefaultConfig()
@@ -102,7 +113,6 @@ func LoadConfig(pathStr string) (*Config, error) {
 		return nil, fmt.Errorf("parsing config file %s: %w", configPath, err)
 	}
 
-	// Ensure non-nil slices and maps
 	if cfg.VanityURLs == nil {
 		cfg.VanityURLs = make(map[string]string)
 	}
@@ -116,42 +126,20 @@ func LoadConfig(pathStr string) (*Config, error) {
 	return cfg, nil
 }
 
-// findConfigFile searches for .bomhound.yaml / .bomhound.yml in current dir,
-// upwards up to 3 levels, or ~/.config/bomhound/config.yaml.
-func findConfigFile() string {
-	currDir, err := os.Getwd()
-	if err == nil {
-		dir := currDir
-		for level := 0; level <= 3; level++ {
-			for _, filename := range []string{".bomhound.yaml", ".bomhound.yml"} {
-				candidate := filepath.Join(dir, filename)
-				if fi, err := os.Stat(candidate); err == nil && !fi.IsDir() {
-					return candidate
-				}
-			}
-			parent := filepath.Dir(dir)
-			if parent == dir {
-				break
-			}
-			dir = parent
-		}
-	}
-
+// findTrustedConfigFile searches exclusively in ~/.config/bomhound/config.{yaml,yml}.
+func findTrustedConfigFile() string {
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		for _, filename := range []string{"config.yaml", "config.yml"} {
 			candidate := filepath.Join(home, ".config", "bomhound", filename)
-			if fi, err := os.Stat(candidate); err == nil && !fi.IsDir() {
+			if fi, err := os.Lstat(candidate); err == nil && fi.Mode().IsRegular() {
 				return candidate
 			}
 		}
 	}
-
 	return ""
 }
 
 // IsExcluded checks if a component is excluded based on its PURL or name.
-// It checks prefix and glob matches against Exclude.PURLs and Exclude.Names.
-// If excluded, it returns true and the matching pattern. Otherwise, it returns false, "".
 func (c *Config) IsExcluded(purl, name string) (bool, string) {
 	if c == nil {
 		return false, ""
@@ -219,7 +207,6 @@ func globToRegexp(pattern string) (*regexp.Regexp, error) {
 		c := pattern[i]
 		switch c {
 		case '*':
-			// Collapse redundant consecutive asterisks to prevent exponential NFA states
 			for i+1 < len(pattern) && pattern[i+1] == '*' {
 				i++
 			}

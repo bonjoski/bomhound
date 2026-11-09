@@ -115,10 +115,10 @@ func TestLookupLicenses_CorporateAllowlistVerification(t *testing.T) {
 
 	purls := []string{
 		"pkg:golang/github.com/Azure/azure-sdk-for-go/sdk/azcore@v1.14.0", // MIT
-		"pkg:golang/google.golang.org/grpc@v1.76.0",                        // Apache-2.0
-		"anyhow",                                                          // MIT
-		"pkg:golang/golang.org/x/crypto@v0.43.0",                          // BSD-3-Clause (Not in allowlist)
-		"unknown-package",                                                 // UNKNOWN
+		"pkg:golang/google.golang.org/grpc@v1.76.0",                       // Apache-2.0
+		"anyhow",                                 // MIT
+		"pkg:golang/golang.org/x/crypto@v0.43.0", // BSD-3-Clause (Not in allowlist)
+		"unknown-package",                        // UNKNOWN
 	}
 
 	licenses, err := LookupLicenses(ctx, purls)

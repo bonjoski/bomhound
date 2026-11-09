@@ -5,15 +5,19 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
 // DefaultNegativeTTL is the duration for which negative (not-found) lookups are cached.
 const DefaultNegativeTTL = 7 * 24 * time.Hour
+
+const maxCacheFileBytes = 64 << 20 // 64 MiB max cache file read
 
 // Cache stores resolved PURLs, copyright notices, license data, and negative lookup timestamps.
 type Cache struct {
@@ -44,12 +48,12 @@ func (c *Cache) SetDirStore(dir string) error {
 	return os.MkdirAll(entriesDir, 0700)
 }
 
-// Load reads the cache from a JSON file.
+// Load reads the cache from a JSON file using bounded, symlink-guarded reads.
 func (c *Cache) Load(path string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	data, err := os.ReadFile(path)
+	data, err := readBoundedRegularFile(path, maxCacheFileBytes)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -62,30 +66,15 @@ func (c *Cache) Load(path string) error {
 		return fmt.Errorf("unmarshaling cache: %w", err)
 	}
 
-	// Merge disk cache into memory
-	if c.ResolvedPURLs == nil {
-		c.ResolvedPURLs = make(map[string]string)
-	}
+	c.ensureMapsLocked()
 	for k, v := range diskCache.ResolvedPURLs {
 		c.ResolvedPURLs[k] = v
-	}
-
-	if c.Copyrights == nil {
-		c.Copyrights = make(map[string]string)
 	}
 	for k, v := range diskCache.Copyrights {
 		c.Copyrights[k] = v
 	}
-
-	if c.Licenses == nil {
-		c.Licenses = make(map[string]string)
-	}
 	for k, v := range diskCache.Licenses {
 		c.Licenses[k] = v
-	}
-
-	if c.NegativeLookups == nil {
-		c.NegativeLookups = make(map[string]int64)
 	}
 	for k, v := range diskCache.NegativeLookups {
 		c.NegativeLookups[k] = v
@@ -94,11 +83,28 @@ func (c *Cache) Load(path string) error {
 	return nil
 }
 
-// Save atomically writes the cache to a JSON file using a read-merge-write strategy
-// to prevent lost-update races when multiple concurrent processes share the file.
+func (c *Cache) ensureMapsLocked() {
+	if c.ResolvedPURLs == nil {
+		c.ResolvedPURLs = make(map[string]string)
+	}
+	if c.Copyrights == nil {
+		c.Copyrights = make(map[string]string)
+	}
+	if c.Licenses == nil {
+		c.Licenses = make(map[string]string)
+	}
+	if c.NegativeLookups == nil {
+		c.NegativeLookups = make(map[string]int64)
+	}
+}
+
+// Save atomically writes the cache to a JSON file using cross-process syscall.Flock
+// and a read-merge-write strategy to prevent lost-update races across concurrent processes.
 func (c *Cache) Save(path string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	c.ensureMapsLocked()
 
 	dir := filepath.Dir(path)
 	if dir != "" && dir != "." {
@@ -107,8 +113,32 @@ func (c *Cache) Save(path string) error {
 		}
 	}
 
-	// 1. Read existing on-disk state to merge external changes
-	if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+	if lfi, err := os.Lstat(path); err == nil && lfi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to write cache through symlink: %s", path)
+	}
+
+	// Acquire cross-process advisory file lock across the entire read-merge-write-rename window.
+	lockPath := path + ".lock"
+	if lfi, err := os.Lstat(lockPath); err == nil && lfi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to open symlinked cache lock file: %s", lockPath)
+	}
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return fmt.Errorf("opening cache lock file: %w", err)
+	}
+	defer lockFile.Close()
+
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("acquiring cache flock: %w", err)
+	}
+	defer func() {
+		if unErr := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN); unErr != nil {
+			return
+		}
+	}()
+
+	// 1. Read existing on-disk state under lock to merge external changes
+	if data, err := readBoundedRegularFile(path, maxCacheFileBytes); err == nil && len(data) > 0 {
 		var diskCache Cache
 		if err := json.Unmarshal(data, &diskCache); err == nil {
 			for k, v := range diskCache.ResolvedPURLs {
@@ -140,16 +170,25 @@ func (c *Cache) Save(path string) error {
 		return fmt.Errorf("marshaling cache: %w", err)
 	}
 
-	// 3. Write to temporary file with secure 0600 permissions
+	// 3. Write to temporary file with strict 0600 permissions
 	tmpFile, err := os.CreateTemp(dir, ".sbom-cache-tmp-*")
 	if err != nil {
 		return fmt.Errorf("creating temporary cache file: %w", err)
 	}
 	tmpName := tmpFile.Name()
+	renamed := false
 	defer func() {
-		_ = os.Remove(tmpName)
+		if !renamed {
+			if rmErr := os.Remove(tmpName); rmErr != nil && !os.IsNotExist(rmErr) {
+				return
+			}
+		}
 	}()
 
+	if err := tmpFile.Chmod(0600); err != nil {
+		tmpFile.Close()
+		return fmt.Errorf("setting 0600 mode on temporary cache: %w", err)
+	}
 	if _, err := tmpFile.Write(data); err != nil {
 		tmpFile.Close()
 		return fmt.Errorf("writing temporary cache: %w", err)
@@ -166,7 +205,7 @@ func (c *Cache) Save(path string) error {
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("atomic cache rename: %w", err)
 	}
-
+	renamed = true
 	return nil
 }
 
@@ -199,7 +238,9 @@ func (c *Cache) SetResolvedPURL(purl, resolved string) {
 	c.mu.Unlock()
 
 	if dirStore != "" {
-		_ = c.writeDirEntry(purl, dirEntry{PURL: purl, ResolvedPURL: resolved})
+		if err := c.writeDirEntry(purl, dirEntry{PURL: purl, ResolvedPURL: resolved}); err != nil {
+			return
+		}
 	}
 }
 
@@ -232,18 +273,19 @@ func (c *Cache) SetCopyright(purl, copyright string) {
 	c.mu.Unlock()
 
 	if dirStore != "" {
-		_ = c.writeDirEntry(purl, dirEntry{PURL: purl, Copyright: copyright})
+		if err := c.writeDirEntry(purl, dirEntry{PURL: purl, Copyright: copyright}); err != nil {
+			return
+		}
 	}
 }
 
 // IsNegative checks if a PURL is currently cached as having no copyright within the given TTL.
-// If ttl is 0, DefaultNegativeTTL (7 days) is used.
 func (c *Cache) IsNegative(purl string, ttl time.Duration) bool {
 	if ttl == 0 {
 		ttl = DefaultNegativeTTL
 	}
 	if ttl < 0 {
-		return false // Explicitly expired
+		return false
 	}
 
 	c.mu.RLock()
@@ -279,7 +321,6 @@ func (c *Cache) SetLicense(purl, license string) {
 	c.Licenses[purl] = license
 }
 
-// Content-addressed directory storage types and helpers
 type dirEntry struct {
 	PURL         string `json:"purl"`
 	ResolvedPURL string `json:"resolved_purl,omitempty"`
@@ -296,7 +337,7 @@ func (c *Cache) hashKey(key string) string {
 func (c *Cache) readDirEntry(purl string) (*dirEntry, error) {
 	hash := c.hashKey(purl)
 	path := filepath.Join(c.dirStorePath, "entries", hash+".json")
-	data, err := os.ReadFile(path)
+	data, err := readBoundedRegularFile(path, 1<<20)
 	if err != nil {
 		return nil, err
 	}
@@ -321,14 +362,54 @@ func (c *Cache) writeDirEntry(purl string, entry dirEntry) error {
 		return err
 	}
 	tmpName := tmpFile.Name()
-	defer func() { _ = os.Remove(tmpName) }()
+	renamed := false
+	defer func() {
+		if !renamed {
+			if rmErr := os.Remove(tmpName); rmErr != nil && !os.IsNotExist(rmErr) {
+				return
+			}
+		}
+	}()
 
 	if _, err := tmpFile.Write(data); err != nil {
 		tmpFile.Close()
 		return err
 	}
-	tmpFile.Close()
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
 
 	dest := filepath.Join(entriesDir, hash+".json")
-	return os.Rename(tmpName, dest)
+	if err := os.Rename(tmpName, dest); err != nil {
+		return err
+	}
+	renamed = true
+	return nil
+}
+
+func readBoundedRegularFile(path string, maxBytes int64) ([]byte, error) {
+	lfi, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if lfi.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("refusing to read symlinked cache file %s", path)
+	}
+	if !lfi.Mode().IsRegular() {
+		return nil, fmt.Errorf("cache path %s is not a regular file", path)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("cache file %s exceeds %d byte limit", path, maxBytes)
+	}
+	return data, nil
 }

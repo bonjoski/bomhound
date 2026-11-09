@@ -113,3 +113,91 @@ func TestAdversarial_CircuitBreaker_RateLimitExceeded(t *testing.T) {
 		t.Fatalf("Expected ErrRateLimitExceeded, got: %v", err)
 	}
 }
+
+// TestAdversarial_BMH01_EncodedPURLTraversalAndTokenPinning verifies:
+//  1. Percent-encoded path traversal (%2e%2e%2f), dot segments, query/fragment injection in PURLs
+//     are rejected BEFORE any GitHub API request is issued.
+//  2. authPinningTransport ONLY attaches Authorization: Bearer to https://api.github.com.
+func TestAdversarial_BMH01_EncodedPURLTraversalAndTokenPinning(t *testing.T) {
+	requestCount := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	client := github.NewClient(nil)
+	client.BaseURL, _ = github.NewClient(nil).BaseURL.Parse(ts.URL + "/")
+	finder := &Finder{client: client}
+
+	maliciousPURLs := []string{
+		"pkg:github/..%2f..%2fusers/victim@v1.0.0",
+		"pkg:github/owner/..%2f..%2forg%2fsecret-repo@v1.0.0",
+		"pkg:github/./repo@v1.0.0",
+		"pkg:github/owner/..@v1.0.0",
+		"pkg:github/owner/repo%3fadmin=1@v1.0.0",
+		"pkg:github/owner/repo%23frag@v1.0.0",
+		"pkg:golang/github.com/owner/..%2fsecret@v1.0.0",
+	}
+
+	for _, purl := range maliciousPURLs {
+		_, err := finder.FindCopyrights(context.Background(), purl)
+		if err == nil {
+			t.Fatalf("BMH-01 regression: malicious PURL %q was accepted!", purl)
+		}
+	}
+	if requestCount != 0 {
+		t.Fatalf("BMH-01 regression: %d HTTP requests were sent for invalid/traversal PURLs!", requestCount)
+	}
+
+	// Verify authPinningTransport never leaks token to non-api.github.com hosts or plain HTTP
+	var capturedAuth string
+	roundTripFunc := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		capturedAuth = req.Header.Get("Authorization")
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+	})
+	tr := &authPinningTransport{base: roundTripFunc, token: "ghp_super_secret_token"}
+
+	evilReq, _ := http.NewRequest("GET", "https://evil.example.com/repos/a/b/license", nil)
+	_, _ = tr.RoundTrip(evilReq)
+	if capturedAuth != "" {
+		t.Fatalf("BMH-01 regression: Bearer token leaked to evil host: %q", capturedAuth)
+	}
+
+	httpDowngradeReq, _ := http.NewRequest("GET", "http://api.github.com/repos/a/b/license", nil)
+	_, _ = tr.RoundTrip(httpDowngradeReq)
+	if capturedAuth != "" {
+		t.Fatalf("BMH-01 regression: Bearer token leaked over cleartext HTTP: %q", capturedAuth)
+	}
+
+	legitReq, _ := http.NewRequest("GET", "https://api.github.com/repos/a/b/license", nil)
+	_, _ = tr.RoundTrip(legitReq)
+	if capturedAuth != "Bearer ghp_super_secret_token" {
+		t.Fatalf("Expected Bearer token on https://api.github.com, got: %q", capturedAuth)
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+// TestAdversarial_BMH06_HTTP429RateLimit verifies HTTP 429 Too Many Requests immediately trips ErrRateLimitExceeded.
+func TestAdversarial_BMH06_HTTP429RateLimit(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprintln(w, `{"message": "secondary rate limit"}`)
+	}))
+	defer ts.Close()
+
+	client := github.NewClient(nil)
+	client.BaseURL, _ = github.NewClient(nil).BaseURL.Parse(ts.URL + "/")
+	finder := &Finder{client: client}
+
+	_, err := finder.FindCopyrights(context.Background(), "pkg:github/owner/repo@v1.0.0")
+	if err != ErrRateLimitExceeded {
+		t.Fatalf("Expected ErrRateLimitExceeded on HTTP 429, got: %v", err)
+	}
+}

@@ -4,11 +4,15 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
+	"github.com/bonjoski/bomhound/internal/safehttp"
 	"github.com/google/go-github/v66/github"
 	"github.com/package-url/packageurl-go"
 )
@@ -17,17 +21,90 @@ import (
 var (
 	ErrAuthenticationFailed = errors.New("github authentication failed (HTTP 401)")
 	ErrRateLimitExceeded    = errors.New("github api rate limit exceeded (HTTP 403/429)")
+	ErrInvalidGitHubTarget  = errors.New("invalid github owner or repository segment")
 )
+
+var (
+	gitHubSegmentRegex = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+	gitHubRefRegex     = regexp.MustCompile(`^[A-Za-z0-9_./+-]+$`)
+)
+
+// authPinningTransport ensures Bearer tokens are only transmitted to api.github.com over HTTPS.
+type authPinningTransport struct {
+	base  http.RoundTripper
+	token string
+}
+
+func (t *authPinningTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	cloned := req.Clone(req.Context())
+	if t.token != "" &&
+		cloned.URL != nil &&
+		strings.EqualFold(cloned.URL.Scheme, "https") &&
+		strings.EqualFold(cloned.URL.Hostname(), "api.github.com") {
+		cloned.Header.Set("Authorization", "Bearer "+t.token)
+	} else {
+		cloned.Header.Del("Authorization")
+	}
+	return t.base.RoundTrip(cloned)
+}
 
 // Finder handles copyright lookups.
 type Finder struct {
 	client *github.Client
 }
 
-// NewFinder creates a new copyright finder with the given token.
+// NewFinder creates a new copyright finder backed by safehttp with host-pinned token auth.
 func NewFinder(token string) *Finder {
-	client := github.NewClient(nil).WithAuthToken(token)
-	return &Finder{client: client}
+	httpClient := safehttp.NewClient(15 * time.Second)
+	trimmedToken := strings.TrimSpace(token)
+	if trimmedToken != "" {
+		baseRT := httpClient.Transport
+		if baseRT == nil {
+			baseRT = http.DefaultTransport
+		}
+		httpClient.Transport = &authPinningTransport{
+			base:  baseRT,
+			token: trimmedToken,
+		}
+	}
+	return &Finder{client: github.NewClient(httpClient)}
+}
+
+// IsValidGitHubSegment validates a GitHub owner or repository path segment,
+// rejecting '.', '..', path separators, query/fragment characters, and percent-encoding.
+func IsValidGitHubSegment(seg string) bool {
+	if seg == "" || len(seg) > 100 || seg == "." || seg == ".." {
+		return false
+	}
+	return gitHubSegmentRegex.MatchString(seg)
+}
+
+func isValidGitHubRef(ref string) bool {
+	if ref == "" {
+		return true
+	}
+	if len(ref) > 256 || strings.Contains(ref, "..") || strings.HasPrefix(ref, "/") || strings.HasSuffix(ref, "/") {
+		return false
+	}
+	return gitHubRefRegex.MatchString(ref)
+}
+
+func hasEncodedTraversal(raw string) bool {
+	// Strip query/subpath before inspecting coordinates for percent-encoded separators
+	coord := raw
+	if qIdx := strings.IndexAny(coord, "?#"); qIdx != -1 {
+		coord = coord[:qIdx]
+	}
+	lower := strings.ToLower(coord)
+	for _, seq := range []string{"%2f", "%5c", "%2e", "%3f", "%23", "%00", "..", "/./"} {
+		if strings.Contains(lower, seq) {
+			return true
+		}
+	}
+	if strings.HasSuffix(lower, "/.") {
+		return true
+	}
+	return false
 }
 
 // FindCopyright attempts to find copyright information for a given PURL (single notice convenience).
@@ -43,11 +120,16 @@ func (f *Finder) FindCopyright(ctx context.Context, purl string) (string, error)
 }
 
 // FindCopyrights attempts to find all distinct copyright statements for a given PURL.
-// It parses the PURL, checks release commit/tag if available, and extracts co-author notices.
 func (f *Finder) FindCopyrights(ctx context.Context, purl string) ([]string, error) {
 	owner, repo, ref, err := parseGitHubPURL(purl)
-	if err != nil || owner == "" || repo == "" {
-		return nil, nil // Not resolvable to GitHub
+	if err != nil {
+		return nil, err
+	}
+	if owner == "" || repo == "" {
+		return nil, nil
+	}
+	if !IsValidGitHubSegment(owner) || !IsValidGitHubSegment(repo) || !isValidGitHubRef(ref) {
+		return nil, ErrInvalidGitHubTarget
 	}
 
 	opts := &github.RepositoryContentGetOptions{}
@@ -85,7 +167,6 @@ func (f *Finder) FindCopyrights(ctx context.Context, purl string) ([]string, err
 		}
 	}
 
-	// Return empty slice (nil) when not found, NOT a sentinel string
 	return nil, nil
 }
 
@@ -94,56 +175,77 @@ func parseGitHubPURL(rawPURL string) (owner, repo, ref string, err error) {
 	if trimmed == "" {
 		return "", "", "", nil
 	}
+	if hasEncodedTraversal(trimmed) {
+		return "", "", "", fmt.Errorf("%w: encoded traversal in %q", ErrInvalidGitHubTarget, trimmed)
+	}
 
 	// Try standard packageurl-go parser
-	if p, err := packageurl.FromString(trimmed); err == nil {
+	if p, pErr := packageurl.FromString(trimmed); pErr == nil {
 		ref = p.Version
-		// Handle Go pseudo-versions: extract trailing 12-char commit SHA if present
 		if strings.HasPrefix(p.Version, "v0.0.0-") && len(p.Version) >= 12 {
 			ref = p.Version[len(p.Version)-12:]
 		}
 
-		if p.Type == "golang" {
-			// pkg:golang/github.com/owner/repo
-			ns := strings.TrimPrefix(p.Namespace, "github.com/")
-			ns = strings.TrimPrefix(ns, "github.com")
-			parts := strings.Split(strings.Trim(ns, "/"), "/")
-			if len(parts) >= 1 && parts[0] != "" {
-				owner = parts[0]
-				repo = p.Name
-				return owner, repo, ref, nil
+		switch p.Type {
+		case "golang":
+			ns := strings.Trim(p.Namespace, "/")
+			if ns == "github.com" || strings.HasPrefix(ns, "github.com/") {
+				rest := strings.TrimPrefix(ns, "github.com")
+				rest = strings.Trim(rest, "/")
+				parts := strings.Split(rest, "/")
+				if len(parts) == 1 && parts[0] != "" {
+					owner = parts[0]
+					repo = p.Name
+				} else if len(parts) >= 2 {
+					owner = parts[0]
+					repo = parts[1]
+				}
 			}
-		} else if p.Type == "github" {
-			// pkg:github/owner/repo
+		case "github":
 			if p.Namespace != "" && p.Name != "" {
-				return p.Namespace, p.Name, ref, nil
-			}
-			parts := strings.Split(p.Name, "/")
-			if len(parts) >= 2 {
-				return parts[0], parts[1], ref, nil
+				owner = p.Namespace
+				repo = p.Name
+			} else {
+				parts := strings.Split(p.Name, "/")
+				if len(parts) == 2 {
+					owner = parts[0]
+					repo = parts[1]
+				}
 			}
 		}
-	}
 
-	// Fallback to substring matching
-	if !strings.Contains(trimmed, "github.com/") {
+		if owner != "" || repo != "" {
+			if !IsValidGitHubSegment(owner) || !IsValidGitHubSegment(repo) || !isValidGitHubRef(ref) {
+				return "", "", "", fmt.Errorf("%w: owner=%q repo=%q", ErrInvalidGitHubTarget, owner, repo)
+			}
+			return owner, repo, ref, nil
+		}
 		return "", "", "", nil
 	}
 
-	parts := strings.Split(trimmed, "github.com/")
-	if len(parts) < 2 {
-		return "", "", "", nil
+	// Strict URL / github.com/<owner>/<repo> fallback (rejecting evil.com/github.com/...).
+	candidate := trimmed
+	if strings.HasPrefix(candidate, "github.com/") {
+		candidate = "https://" + candidate
 	}
-
-	repoPath := parts[1]
-	if idx := strings.Index(repoPath, "@"); idx != -1 {
-		ref = repoPath[idx+1:]
-		repoPath = repoPath[:idx]
-	}
-
-	pathParts := strings.Split(strings.Trim(repoPath, "/"), "/")
-	if len(pathParts) >= 2 {
-		return pathParts[0], pathParts[1], ref, nil
+	if strings.HasPrefix(candidate, "https://") || strings.HasPrefix(candidate, "http://") {
+		u, uErr := url.Parse(candidate)
+		if uErr != nil || !strings.EqualFold(u.Hostname(), "github.com") || u.RawQuery != "" || u.Fragment != "" {
+			return "", "", "", nil
+		}
+		repoPath := strings.Trim(u.Path, "/")
+		if idx := strings.Index(repoPath, "@"); idx != -1 {
+			ref = repoPath[idx+1:]
+			repoPath = repoPath[:idx]
+		}
+		pathParts := strings.Split(repoPath, "/")
+		if len(pathParts) >= 2 {
+			owner, repo = pathParts[0], strings.TrimSuffix(pathParts[1], ".git")
+			if !IsValidGitHubSegment(owner) || !IsValidGitHubSegment(repo) || !isValidGitHubRef(ref) {
+				return "", "", "", fmt.Errorf("%w: owner=%q repo=%q", ErrInvalidGitHubTarget, owner, repo)
+			}
+			return owner, repo, ref, nil
+		}
 	}
 
 	return "", "", "", nil
@@ -154,8 +256,11 @@ func (f *Finder) checkCircuitBreaker(resp *github.Response, err error) error {
 		if resp.StatusCode == http.StatusUnauthorized {
 			return ErrAuthenticationFailed
 		}
-		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
-			if resp.Rate.Remaining == 0 {
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return ErrRateLimitExceeded
+		}
+		if resp.StatusCode == http.StatusForbidden {
+			if resp.Rate.Remaining == 0 || resp.Header.Get("Retry-After") != "" {
 				return ErrRateLimitExceeded
 			}
 		}
@@ -205,7 +310,6 @@ func ExtractCopyrights(content string) []string {
 
 		if copyrightRegex.MatchString(line) {
 			lower := strings.ToLower(line)
-			// Filter out common documentation boilerplate and false positives
 			if strings.Contains(lower, "see the copyright") ||
 				strings.Contains(lower, "see copyright") ||
 				strings.Contains(lower, "copyright notice") ||
@@ -215,7 +319,6 @@ func ExtractCopyrights(content string) []string {
 				continue
 			}
 
-			// Capture wrapped lines if current line ends without period and next line looks like organization name
 			if i+1 < len(lines) && (strings.HasSuffix(lower, "by") || strings.HasSuffix(lower, "copyright (c)") || strings.HasSuffix(lower, "copyright")) {
 				nextLine := strings.TrimSpace(lines[i+1])
 				nextLine = strings.TrimPrefix(nextLine, "//")

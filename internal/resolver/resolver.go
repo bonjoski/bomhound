@@ -2,9 +2,11 @@ package resolver
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -13,7 +15,7 @@ import (
 
 var npmRegistryBase = "https://registry.npmjs.org/"
 
-var defaultHTTPClient = safehttp.NewSafeHTTPClient(10 * time.Second)
+var defaultHTTPClient = safehttp.NewClient(10 * time.Second)
 
 // SetHTTPClient allows overriding the HTTP client (useful for unit tests with httptest.Server).
 func SetHTTPClient(client *http.Client) func() {
@@ -26,7 +28,6 @@ func SetHTTPClient(client *http.Client) func() {
 
 // ResolveRepoURL attempts to find the source repository URL for a given PURL.
 func ResolveRepoURL(purl string) (string, error) {
-	// Example PURL: pkg:npm/@auth0/auth0-spa-js@2.0.7
 	if strings.HasPrefix(purl, "pkg:npm/") {
 		return resolveNpm(purl)
 	}
@@ -41,31 +42,61 @@ type npmPackageInfo struct {
 }
 
 func resolveNpm(purl string) (string, error) {
-	// Extract package name
-	// pkg:npm/scope/name@version or pkg:npm/name@version
-	parts := strings.Split(purl, "/")
-	if len(parts) < 2 {
+	if !strings.HasPrefix(purl, "pkg:npm/") {
 		return "", fmt.Errorf("invalid npm purl: %s", purl)
 	}
 
-	// Remove "pkg:npm" prefix
-	path := purl[8:]
-
-	// Handle version if present
-	if idx := strings.LastIndex(path, "@"); idx != -1 {
-		path = path[:idx]
+	rawCoord := purl[len("pkg:npm/"):]
+	// Strip PURL qualifiers or subpaths
+	if qIdx := strings.IndexAny(rawCoord, "?#"); qIdx != -1 {
+		rawCoord = rawCoord[:qIdx]
+	}
+	// Strip @version suffix (preserving leading '@' on scoped packages)
+	if idx := strings.LastIndex(rawCoord, "@"); idx > 0 {
+		rawCoord = rawCoord[:idx]
 	}
 
-	// Construct registry URL
-	url := fmt.Sprintf("%s%s", npmRegistryBase, path)
+	// Reject percent-encoded path separators or traversal before unescaping
+	lowerCoord := strings.ToLower(rawCoord)
+	for _, bad := range []string{"%2f", "%5c", "%2e", "%00", "..", "\\"} {
+		if strings.Contains(lowerCoord, bad) {
+			return "", fmt.Errorf("invalid npm package path %q", rawCoord)
+		}
+	}
 
-	resp, err := defaultHTTPClient.Get(url)
+	rawSegs := strings.Split(rawCoord, "/")
+	var escapedPath string
+	switch len(rawSegs) {
+	case 1:
+		name, err := sanitizeNpmSegment(rawSegs[0], false)
+		if err != nil {
+			return "", err
+		}
+		escapedPath = url.PathEscape(name)
+	case 2:
+		scope, err := sanitizeNpmSegment(rawSegs[0], true)
+		if err != nil {
+			return "", err
+		}
+		name, err := sanitizeNpmSegment(rawSegs[1], false)
+		if err != nil {
+			return "", err
+		}
+		escapedPath = "@" + url.PathEscape(strings.TrimPrefix(scope, "@")) + "/" + url.PathEscape(name)
+	default:
+		return "", fmt.Errorf("invalid npm package coordinate %q", rawCoord)
+	}
+
+	base := strings.TrimRight(npmRegistryBase, "/")
+	reqURL := base + "/" + escapedPath
+
+	resp, err := defaultHTTPClient.Get(reqURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch npm registry: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("npm registry returned status %d", resp.StatusCode)
 	}
 
@@ -74,30 +105,36 @@ func resolveNpm(purl string) (string, error) {
 		return "", fmt.Errorf("failed to decode npm response: %w", err)
 	}
 
-	repoURL := info.Repository.URL
-	return cleanRepoURL(repoURL), nil
+	return cleanRepoURL(info.Repository.URL), nil
 }
 
-func cleanRepoURL(url string) string {
-	// Normalize URL to be github.com/owner/repo
-	// Examples:
-	// git+https://github.com/owner/repo.git
-	// git://github.com/owner/repo.git
-	// https://github.com/owner/repo
-
-	url = strings.TrimSpace(url)
-	url = strings.TrimPrefix(url, "git+")
-	url = strings.TrimPrefix(url, "git://")
-	url = strings.TrimPrefix(url, "https://")
-	url = strings.TrimPrefix(url, "http://")
-	url = strings.TrimPrefix(url, "ssh://git@")
-
-	url = strings.TrimSuffix(url, ".git")
-
-	// Ensure it starts with github.com if it's a github repo
-	if strings.HasPrefix(url, "github.com/") {
-		return url
+func sanitizeNpmSegment(seg string, isScope bool) (string, error) {
+	decoded, err := url.PathUnescape(seg)
+	if err != nil {
+		return "", fmt.Errorf("invalid percent-encoding in npm segment %q: %w", seg, err)
 	}
+	decoded = strings.TrimSpace(decoded)
+	if decoded == "" || decoded == "." || decoded == ".." {
+		return "", errors.New("empty or dot npm segment")
+	}
+	if isScope {
+		if !strings.HasPrefix(decoded, "@") || len(decoded) < 2 {
+			return "", fmt.Errorf("npm scope %q must start with '@'", decoded)
+		}
+	}
+	check := decoded
+	if isScope {
+		check = decoded[1:]
+	}
+	if check == "." || check == ".." || strings.ContainsAny(check, "/\\?#%\x00 \t\r\n") {
+		return "", fmt.Errorf("unsafe characters in npm segment %q", seg)
+	}
+	return decoded, nil
+}
 
-	return url
+func cleanRepoURL(rawURL string) string {
+	if gh, ok := extractExactGitHubRepo(rawURL); ok {
+		return gh
+	}
+	return ""
 }

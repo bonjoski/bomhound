@@ -9,7 +9,14 @@ import (
 )
 
 func isGitHubRepo(urlOrPURL string) bool {
-	return strings.Contains(urlOrPURL, "github.com") || strings.HasPrefix(urlOrPURL, "pkg:github/")
+	u := strings.ToLower(strings.TrimSpace(urlOrPURL))
+	return strings.HasPrefix(u, "pkg:github/") ||
+		strings.HasPrefix(u, "pkg:golang/github.com/") ||
+		strings.HasPrefix(u, "github.com/") ||
+		strings.HasPrefix(u, "https://github.com/") ||
+		strings.HasPrefix(u, "http://github.com/") ||
+		strings.HasPrefix(u, "git+https://github.com/") ||
+		strings.HasPrefix(u, "git+http://github.com/")
 }
 
 func (e *Enricher) processComponentWithCategory(ctx context.Context, comp *cdx.Component) ([]string, string, error) {

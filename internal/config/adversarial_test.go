@@ -66,8 +66,8 @@ func TestAdversarial_BypassAttempts(t *testing.T) {
 // return structured errors instead of panicking.
 func TestAdversarial_MalformedYAMLTypes(t *testing.T) {
 	malformedConfigs := []string{
-		"version: [1, 2, 3]",                  // Array instead of string
-		"exclude: 'should be an object'",       // String instead of map
+		"version: [1, 2, 3]",                 // Array instead of string
+		"exclude: 'should be an object'",     // String instead of map
 		"cache:\n  ttl_days: 'not-a-number'", // String instead of int
 		"compliance:\n  min_coverage_percent: 'bad-float'",
 		"exclude:\n  purls:\n  - valid\n bad_indentation", // Syntax error

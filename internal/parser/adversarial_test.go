@@ -180,3 +180,56 @@ func TestAdversarial_CycloneDXMetadataPreservation(t *testing.T) {
 		t.Errorf("Dependencies array missing in roundtrip output")
 	}
 }
+
+// TestAdversarial_BMH05_ParentDirectorySymlinkTraversal verifies SaveSBOM rejects
+// writing through a symlinked parent directory.
+func TestAdversarial_BMH05_ParentDirectorySymlinkTraversal(t *testing.T) {
+	tempDir := t.TempDir()
+	outsideDir := t.TempDir()
+
+	symlinkDir := filepath.Join(tempDir, "escaped-dir")
+	if err := os.Symlink(outsideDir, symlinkDir); err != nil {
+		t.Fatalf("Failed to create directory symlink: %v", err)
+	}
+
+	bom := cdx.NewBOM()
+	targetOut := filepath.Join(symlinkDir, "out.cdx.json")
+	err := SaveSBOM(bom, cdx.BOMFileFormatJSON, targetOut)
+	if err == nil {
+		t.Fatalf("BMH-05 regression: SaveSBOM wrote through a symlinked parent directory!")
+	}
+	if _, statErr := os.Stat(filepath.Join(outsideDir, "out.cdx.json")); !os.IsNotExist(statErr) {
+		t.Fatalf("BMH-05 regression: file created inside escaped target directory!")
+	}
+}
+
+// TestAdversarial_BMH05_OversizedSBOMStreamRejected verifies streams > MaxSBOMBytes (64 MiB)
+// fail closed without exhausting process memory.
+func TestAdversarial_BMH05_OversizedSBOMStreamRejected(t *testing.T) {
+	// Zero-allocation synthetic infinite JSON padding reader exceeding MaxSBOMBytes
+	r := &repeatingByteReader{remaining: MaxSBOMSizeBytes + 1024, b: ' '}
+	_, _, err := ParseSBOMReader(r)
+	if err == nil {
+		t.Fatalf("BMH-05 regression: oversized >64MiB SBOM stream was accepted!")
+	}
+}
+
+type repeatingByteReader struct {
+	remaining int64
+	b         byte
+}
+
+func (r *repeatingByteReader) Read(p []byte) (int, error) {
+	if r.remaining <= 0 {
+		return 0, os.ErrClosed
+	}
+	n := int64(len(p))
+	if n > r.remaining {
+		n = r.remaining
+	}
+	for i := int64(0); i < n; i++ {
+		p[i] = r.b
+	}
+	r.remaining -= n
+	return int(n), nil
+}

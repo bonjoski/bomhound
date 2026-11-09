@@ -3,7 +3,6 @@ package auth
 import (
 	"context"
 	"errors"
-	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -110,32 +109,56 @@ func TestAdversarial_TokenStdin_EmptyAndWhitespace(t *testing.T) {
 	}
 }
 
-// TestAdversarial_TokenStdin_OversizedInput ensures that large stdin inputs are properly consumed
-// without buffer overflows or unbounded memory allocation.
+// TestAdversarial_TokenStdin_OversizedInput ensures that stdin inputs exceeding 4 KiB
+// are rejected fail-closed with ErrTokenTooLarge without unbounded memory allocation,
+// while bounded tokens within 4 KiB succeed.
 func TestAdversarial_TokenStdin_OversizedInput(t *testing.T) {
 	defer resetHooks()
 
-	oldStdin := os.Stdin
-	defer func() { os.Stdin = oldStdin }()
-
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("failed to create pipe: %v", err)
+	// 1. Oversized (> 4 KiB) must be rejected fail-closed
+	oversized := strings.NewReader("ghp_" + strings.Repeat("A", MaxTokenStdinBytes+100))
+	_, err := GetGitHubToken(context.Background(), TokenOptions{
+		TokenStdin: true,
+		Stdin:      oversized,
+	})
+	if !errors.Is(err, ErrTokenTooLarge) {
+		t.Fatalf("expected ErrTokenTooLarge for >4KiB stdin token, got: %v", err)
 	}
-	os.Stdin = r
 
-	expectedToken := "ghp_" + strings.Repeat("A", 10000)
-	go func() {
-		io.WriteString(w, expectedToken+"\n")
-		w.Close()
-	}()
-
-	token, err := GetGitHubToken(context.Background(), TokenOptions{TokenStdin: true})
-	if err != nil {
-		t.Fatalf("unexpected error reading oversized token: %v", err)
+	// 2. Embedded newline injection inside token must be rejected
+	injected := strings.NewReader("ghp_valid\r\nX-Injected: pwned\n")
+	_, err = GetGitHubToken(context.Background(), TokenOptions{
+		TokenStdin: true,
+		Stdin:      injected,
+	})
+	if !errors.Is(err, ErrInvalidTokenFormat) {
+		t.Fatalf("expected ErrInvalidTokenFormat for CRLF-injected token, got: %v", err)
 	}
-	if token != expectedToken {
-		t.Fatalf("token mismatch: length got %d, expected %d", len(token), len(expectedToken))
+
+	// 3. Valid bounded token within 4 KiB succeeds
+	validToken := "ghp_" + strings.Repeat("A", 200)
+	got, err := GetGitHubToken(context.Background(), TokenOptions{
+		TokenStdin: true,
+		Stdin:      strings.NewReader(validToken + "\n"),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error reading bounded token: %v", err)
+	}
+	if got != validToken {
+		t.Fatalf("token mismatch: got len %d, want %d", len(got), len(validToken))
+	}
+}
+
+// TestAdversarial_StdinCollision ensures --token-stdin + '-' SBOM stdin collision is rejected.
+func TestAdversarial_StdinCollision(t *testing.T) {
+	if err := ValidateStdinMode(true, true); !errors.Is(err, ErrStdinCollision) {
+		t.Fatalf("expected ErrStdinCollision when both tokenStdin and sbomStdin are true, got: %v", err)
+	}
+	if err := ValidateStdinMode(true, false); err != nil {
+		t.Fatalf("unexpected error when only tokenStdin is true: %v", err)
+	}
+	if err := ValidateStdinMode(false, true); err != nil {
+		t.Fatalf("unexpected error when only sbomStdin is true: %v", err)
 	}
 }
 

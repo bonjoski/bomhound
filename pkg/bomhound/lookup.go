@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -18,87 +19,83 @@ import (
 var embeddedCacheData []byte
 
 var (
-	defaultCache     *cache.Cache
-	defaultCacheOnce sync.Once
-	defaultCacheErr  error
+	defaultCacheMu  sync.Mutex
+	defaultCache    *cache.Cache
+	defaultCacheErr error
 )
 
-// GetDefaultCache returns the singleton cache backed by embedded data and on-disk files.
-// It searches the filesystem first (respecting SBOM_CACHE_PATH and local files)
-// and falls back to embedded cache data for zero-latency in-process lookups.
+func resetDefaultCacheForTest() {
+	defaultCacheMu.Lock()
+	defer defaultCacheMu.Unlock()
+	defaultCache = nil
+	defaultCacheErr = nil
+}
+
+var (
+	apacheLicenseRe = regexp.MustCompile(`(?i)\b(apache(?:\s+license)?(?:\s*,?\s*version\s*2(?:\.0)?|\s+2\.0|-2\.0)|apache-2\.0)\b`)
+	mitLicenseRe    = regexp.MustCompile(`(?i)\b(mit\s+license|mit)\b`)
+	bsd3LicenseRe   = regexp.MustCompile(`(?i)\bbsd[- ]3[- ]clause\b`)
+	bsd2LicenseRe   = regexp.MustCompile(`(?i)\bbsd[- ]2[- ]clause\b`)
+	iscLicenseRe    = regexp.MustCompile(`(?i)\b(isc\s+license|isc)\b`)
+	mplLicenseRe    = regexp.MustCompile(`(?i)\b(mozilla\s+public\s+license|mpl-2\.0|mpl\s+2\.0|mpl)\b`)
+	gplLicenseRe    = regexp.MustCompile(`(?i)\b(gnu\s+general\s+public\s+license|general\s+public\s+license|gpl-3\.0(?:-only|-or-later)?|gplv3|gpl)\b`)
+)
+
+// GetDefaultCache returns the singleton cache backed by embedded data and trusted user cache
+// under ~/.cache/bomhound. Untrusted CWD or parent-directory .sbom-cache.json files are never auto-loaded.
 func GetDefaultCache() (*cache.Cache, error) {
-	defaultCacheOnce.Do(func() {
-		c := cache.New()
-
-		// Candidates for cache file on disk
-		candidates := []string{}
-		if envPath := os.Getenv("SBOM_CACHE_PATH"); envPath != "" {
-			candidates = append(candidates, envPath)
+	defaultCacheMu.Lock()
+	defer defaultCacheMu.Unlock()
+	if defaultCache == nil && defaultCacheErr == nil {
+		c, err := newTrustedCache()
+		if err != nil {
+			defaultCacheErr = err
+		} else {
+			defaultCache = c
 		}
-		candidates = append(candidates,
-			".sbom-cache.json",
-			"../.sbom-cache.json",
-			"../../.sbom-cache.json",
-		)
-
-		// Try finding the cache file in directory tree
-		loaded := false
-		for _, path := range candidates {
-			if stat, err := os.Stat(path); err == nil && !stat.IsDir() {
-				if err := c.Load(path); err == nil {
-					loaded = true
-					break
-				}
-			}
-		}
-
-		// Also check current directory walk upwards up to 5 levels
-		if !loaded {
-			dir, err := os.Getwd()
-			if err == nil {
-				curr := dir
-				for i := 0; i < 5; i++ {
-					target := filepath.Join(curr, ".sbom-cache.json")
-					if stat, err := os.Stat(target); err == nil && !stat.IsDir() {
-						if err := c.Load(target); err == nil {
-							loaded = true
-							break
-						}
-					}
-					parent := filepath.Dir(curr)
-					if parent == curr {
-						break
-					}
-					curr = parent
-				}
-			}
-		}
-
-		// Fallback to embedded cache
-		if !loaded && len(embeddedCacheData) > 0 {
-			if err := json.Unmarshal(embeddedCacheData, c); err != nil {
-				defaultCacheErr = fmt.Errorf("unmarshaling embedded sbom cache: %w", err)
-				return
-			}
-			if c.ResolvedPURLs == nil {
-				c.ResolvedPURLs = make(map[string]string)
-			}
-			if c.Copyrights == nil {
-				c.Copyrights = make(map[string]string)
-			}
-			if c.Licenses == nil {
-				c.Licenses = make(map[string]string)
-			}
-		}
-
-		defaultCache = c
-	})
+	}
 
 	return defaultCache, defaultCacheErr
 }
 
-// LookupLicenses performs in-process license lookup for the provided PURLs or package names.
-// It is backed by .sbom-cache.json to verify licenses against allowlists with zero network latency.
+func newTrustedCache() (*cache.Cache, error) {
+	c := cache.New()
+
+	if len(embeddedCacheData) > 0 {
+		if err := json.Unmarshal(embeddedCacheData, c); err != nil {
+			return nil, fmt.Errorf("unmarshaling embedded sbom cache: %w", err)
+		}
+		if c.ResolvedPURLs == nil {
+			c.ResolvedPURLs = make(map[string]string)
+		}
+		if c.Copyrights == nil {
+			c.Copyrights = make(map[string]string)
+		}
+		if c.Licenses == nil {
+			c.Licenses = make(map[string]string)
+		}
+		if c.NegativeLookups == nil {
+			c.NegativeLookups = make(map[string]int64)
+		}
+	}
+
+	// Overlay trusted user-home cache files only (~/.cache/bomhound/*).
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		trustedDir := filepath.Join(home, ".cache", "bomhound")
+		for _, name := range []string{"cache.json", ".sbom-cache.json"} {
+			candidate := filepath.Join(trustedDir, name)
+			if lfi, statErr := os.Lstat(candidate); statErr == nil && lfi.Mode().IsRegular() {
+				if loadErr := c.Load(candidate); loadErr != nil {
+					continue
+				}
+			}
+		}
+	}
+
+	return c, nil
+}
+
+// LookupLicenses performs strictly offline, zero-network in-process license lookup for the provided PURLs.
 func LookupLicenses(ctx context.Context, purls []string) (map[string]string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("context cancelled: %w", err)
@@ -112,7 +109,7 @@ func LookupLicenses(ctx context.Context, purls []string) (map[string]string, err
 	return LookupLicensesWithCache(ctx, purls, c)
 }
 
-// LookupLicensesWithCache performs license lookup using a specific cache instance.
+// LookupLicensesWithCache performs strictly offline license lookup using a specific cache instance.
 func LookupLicensesWithCache(ctx context.Context, purls []string, c *cache.Cache) (map[string]string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("context cancelled: %w", err)
@@ -134,7 +131,7 @@ func LookupLicensesWithCache(ctx context.Context, purls []string, c *cache.Cache
 	return results, nil
 }
 
-// resolveLicense resolves the SPDX license identifier for a given package name or purl.
+// resolveLicense resolves the SPDX license identifier offline without making any network calls.
 func resolveLicense(c *cache.Cache, purl string) string {
 	trimmed := strings.TrimSpace(purl)
 	if trimmed == "" {
@@ -167,13 +164,12 @@ func resolveLicense(c *cache.Cache, purl string) string {
 		}
 	}
 
-	// 4. Ecosystem & prefix stripping
+	// 4. Ecosystem & prefix stripping (strictly offline map lookups only)
 	candidate := trimmed
 	if withoutVersion != "" {
 		candidate = withoutVersion
 	}
 
-	// Remove pkg:<type>/ prefix
 	if strings.HasPrefix(candidate, "pkg:") {
 		idx := strings.Index(candidate, "/")
 		if idx != -1 && idx+1 < len(candidate) {
@@ -182,7 +178,6 @@ func resolveLicense(c *cache.Cache, purl string) string {
 				return lic
 			}
 
-			// Try resolving vanity URL if golang package
 			if strings.HasPrefix(candidate, "pkg:golang/") {
 				if repo, ok := resolver.ResolveGoVanityURL(pkgPath); ok {
 					if lic, ok := c.GetLicense(repo); ok && lic != "" {
@@ -197,7 +192,6 @@ func resolveLicense(c *cache.Cache, purl string) string {
 				}
 			}
 
-			// Check GitHub repo subpath matching: github.com/owner/repo[/subpath]
 			if strings.HasPrefix(pkgPath, "github.com/") {
 				parts := strings.Split(pkgPath, "/")
 				if len(parts) >= 3 {
@@ -216,7 +210,6 @@ func resolveLicense(c *cache.Cache, purl string) string {
 			}
 		}
 	} else {
-		// Non-PURL plain package name or vanity path (e.g. "golang.org/x/crypto", "anyhow")
 		if repo, ok := resolver.ResolveGoVanityURL(candidate); ok {
 			if lic, ok := c.GetLicense(repo); ok && lic != "" {
 				return lic
@@ -230,7 +223,7 @@ func resolveLicense(c *cache.Cache, purl string) string {
 		}
 	}
 
-	// 5. Copyright heuristic fallback
+	// 5. Copyright heuristic fallback using strict word-boundary matching
 	cpyKeys := []string{trimmed}
 	if withoutVersion != "" {
 		cpyKeys = append(cpyKeys, withoutVersion)
@@ -249,23 +242,23 @@ func resolveLicense(c *cache.Cache, purl string) string {
 	return "UNKNOWN"
 }
 
-// inferLicenseFromText inspects copyright/license text to deduce the canonical SPDX identifier.
+// inferLicenseFromText inspects copyright/license text using word-boundary tokens
+// so entity names like "Acme Limited", "Committer", "Cisco", or "Example" never false-match.
 func inferLicenseFromText(text string) string {
-	lower := strings.ToLower(text)
 	switch {
-	case strings.Contains(lower, "apache"):
+	case apacheLicenseRe.MatchString(text):
 		return "Apache-2.0"
-	case strings.Contains(lower, "mit license") || strings.Contains(lower, "mit"):
-		return "MIT"
-	case strings.Contains(lower, "bsd-3-clause") || strings.Contains(lower, "bsd 3-clause"):
+	case bsd3LicenseRe.MatchString(text):
 		return "BSD-3-Clause"
-	case strings.Contains(lower, "bsd-2-clause") || strings.Contains(lower, "bsd 2-clause"):
+	case bsd2LicenseRe.MatchString(text):
 		return "BSD-2-Clause"
-	case strings.Contains(lower, "isc"):
+	case mitLicenseRe.MatchString(text):
+		return "MIT"
+	case iscLicenseRe.MatchString(text):
 		return "ISC"
-	case strings.Contains(lower, "mozilla") || strings.Contains(lower, "mpl"):
+	case mplLicenseRe.MatchString(text):
 		return "MPL-2.0"
-	case strings.Contains(lower, "general public license") || strings.Contains(lower, "gpl"):
+	case gplLicenseRe.MatchString(text):
 		return "GPL-3.0-only"
 	default:
 		return ""

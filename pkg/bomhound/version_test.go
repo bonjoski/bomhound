@@ -6,13 +6,13 @@ import (
 )
 
 func TestVersion(t *testing.T) {
-	if Version != "0.1.6" && Version != "v0.1.6" {
+	if Version != "0.1.7" && Version != "v0.1.7" {
 		t.Errorf("Unexpected Version: %s", Version)
 	}
 
 	formatted := FormattedVersion()
-	if !strings.HasPrefix(formatted, "v0.1.6") {
-		t.Errorf("Expected FormattedVersion to start with v0.1.6, got: %s", formatted)
+	if !strings.HasPrefix(formatted, "v0.1.7") {
+		t.Errorf("Expected FormattedVersion to start with v0.1.7, got: %s", formatted)
 	}
 
 	// Test with metadata
@@ -24,13 +24,13 @@ func TestVersion(t *testing.T) {
 	GitCommit = "abc1234"
 	BuildDate = "2026-10-28"
 	withMeta := FormattedVersion()
-	if withMeta != "v0.1.6 (abc1234, 2026-10-28)" {
+	if withMeta != "v0.1.7 (abc1234, 2026-10-28)" {
 		t.Errorf("Unexpected FormattedVersion with metadata: %s", withMeta)
 	}
 
 	BuildDate = "unknown"
 	onlyCommit := FormattedVersion()
-	if onlyCommit != "v0.1.6 (abc1234)" {
+	if onlyCommit != "v0.1.7 (abc1234)" {
 		t.Errorf("Unexpected FormattedVersion with commit only: %s", onlyCommit)
 	}
 }

@@ -4,11 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
 )
+
+// MaxTokenStdinBytes caps --token-stdin reads to 4 KiB to prevent unbounded memory exhaustion.
+const MaxTokenStdinBytes = 4 << 10
 
 var (
 	// ErrNoLocksmithKeyConfigured is returned when no key name is provided in config or flag.
@@ -17,12 +21,27 @@ var (
 	ErrNoTokenFound = errors.New("GitHub token not found via Locksmith. Please ensure the key exists in your vault ('locksmith add <key>') or provide it via --token-stdin")
 	// ErrLocksmithNotFound is returned when the locksmith CLI is not installed in PATH.
 	ErrLocksmithNotFound = errors.New("locksmith binary not found in PATH: please install locksmith (brew install bonjoski/tap/locksmith)")
+	// ErrTokenTooLarge is returned when --token-stdin exceeds MaxTokenStdinBytes.
+	ErrTokenTooLarge = fmt.Errorf("token from stdin exceeds maximum size (%d bytes)", MaxTokenStdinBytes)
+	// ErrInvalidTokenFormat is returned when a token contains embedded newlines or NUL bytes.
+	ErrInvalidTokenFormat = errors.New("invalid token format: contains forbidden control characters")
+	// ErrStdinCollision is returned when --token-stdin and SBOM stdin streaming are requested simultaneously.
+	ErrStdinCollision = errors.New("cannot use --token-stdin while reading SBOM from standard input ('-')")
 )
 
 // TokenOptions configures token discovery.
 type TokenOptions struct {
 	LocksmithKey string
 	TokenStdin   bool
+	Stdin        io.Reader
+}
+
+// ValidateStdinMode rejects simultaneous use of --token-stdin and SBOM stdin streaming.
+func ValidateStdinMode(tokenStdin, sbomStdin bool) error {
+	if tokenStdin && sbomStdin {
+		return ErrStdinCollision
+	}
+	return nil
 }
 
 // Internal hooks for testing and mocking external commands
@@ -36,19 +55,22 @@ var (
 func GetGitHubToken(ctx context.Context, opts TokenOptions) (string, error) {
 	// 1. Check if token requested via standard input
 	if opts.TokenStdin {
-		var tokenBuilder strings.Builder
-		buf := make([]byte, 1024)
-		for {
-			n, err := os.Stdin.Read(buf)
-			if n > 0 {
-				tokenBuilder.Write(buf[:n])
-			}
-			if err != nil {
-				break
-			}
+		reader := opts.Stdin
+		if reader == nil {
+			reader = os.Stdin
 		}
-		token := strings.TrimSpace(tokenBuilder.String())
+		raw, err := io.ReadAll(io.LimitReader(reader, MaxTokenStdinBytes+1))
+		if err != nil {
+			return "", fmt.Errorf("reading token from stdin: %w", err)
+		}
+		if len(raw) > MaxTokenStdinBytes {
+			return "", ErrTokenTooLarge
+		}
+		token := strings.TrimSpace(string(raw))
 		if token != "" {
+			if strings.ContainsAny(token, "\r\n\x00") {
+				return "", ErrInvalidTokenFormat
+			}
 			return token, nil
 		}
 	}
@@ -62,6 +84,9 @@ func GetGitHubToken(ctx context.Context, opts TokenOptions) (string, error) {
 	// 3. Primary: Hardware-bound Locksmith vault checkout via CLI
 	token, err := getFromLocksmith(ctx, key)
 	if err == nil && token != "" {
+		if strings.ContainsAny(token, "\r\n\x00") {
+			return "", ErrInvalidTokenFormat
+		}
 		return token, nil
 	}
 
