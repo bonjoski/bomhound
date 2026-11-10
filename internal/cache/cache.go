@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -122,17 +121,17 @@ func (c *Cache) Save(path string) error {
 	if lfi, err := os.Lstat(lockPath); err == nil && lfi.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("refusing to open symlinked cache lock file: %s", lockPath)
 	}
-	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	lf, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return fmt.Errorf("opening cache lock file: %w", err)
 	}
-	defer lockFile.Close()
+	defer lf.Close()
 
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+	if err := lockFile(lf); err != nil {
 		return fmt.Errorf("acquiring cache flock: %w", err)
 	}
 	defer func() {
-		if unErr := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN); unErr != nil {
+		if unErr := unlockFile(lf); unErr != nil {
 			return
 		}
 	}()
