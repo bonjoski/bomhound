@@ -42,9 +42,17 @@ func main() {
 Usage:
   bomhound [flags] <sbom-file-or-dir>
   cat sbom.json | bomhound [flags] > enriched.json
+  bomhound vex kernel [flags]
+
+Subcommands:
+  vex kernel [flags]   Generate OpenVEX statements from microVM Kconfig and symbol tables
 
 Flags:`)
 		flag.PrintDefaults()
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "vex" {
+		os.Exit(runVEX(os.Args[2:]))
 	}
 
 	flag.Parse()
