@@ -9,7 +9,7 @@ before:
 
 builds:
   - id: bomhound
-    main: ./cmd/bomhound/main.go
+    main: ./cmd/bomhound
     binary: bomhound
     env:
       - CGO_ENABLED=0
