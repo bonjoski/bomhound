@@ -3,6 +3,7 @@
 A high-performance CLI tool and Go library for enriching Software Bill of Materials (SBOMs) with copyright, upstream source provenance, and legal attribution notices.
 
 [![CI](https://github.com/bonjoski/bomhound/actions/workflows/ci.yml/badge.svg)](https://github.com/bonjoski/bomhound/actions/workflows/ci.yml)
+[![SLSA 2](https://slsa.dev/images/gh-badge-level2.svg)](https://slsa.dev)
 [![Go Report Card](https://goreportcard.com/badge/github.com/bonjoski/bomhound)](https://goreportcard.com/report/github.com/bonjoski/bomhound)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
@@ -202,6 +203,22 @@ make lint
 
 # Build binary
 make build
+```
+
+---
+
+## Verifying Releases & SLSA Provenance
+
+All official releases generate cryptographic SLSA v1.0 build provenance.
+
+Verify a downloaded release archive:
+```bash
+gh attestation verify dist/bomhound_Linux_x86_64.tar.gz --repo bonjoski/bomhound
+```
+
+Or verify offline using Soulcaster:
+```bash
+soulcaster verify --attestation bomhound.intoto.jsonl bin/bomhound
 ```
 
 ---
