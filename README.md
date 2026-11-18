@@ -78,6 +78,20 @@ In automated CI/CD runners where Locksmith is not available:
 echo "$SECRET_TOKEN" | bomhound --token-stdin testdata/sample-sbom.cdx.json
 ```
 
+---
+
+## 💡 Core Use Cases & Recipes
+
+Every primary developer use case is backed by dedicated, copy-pasteable recipes in [**`docs/use-cases/`**](docs/use-cases/README.md):
+
+| Use Case | Scenario & Quick Recipe | Full Guide |
+| :--- | :--- | :--- |
+| **CycloneDX Legal License Enrichment** | Enrich bare SBOMs with complete license texts and author copyrights:<br/>`bomhound --input bom.json --output enriched-bom.json` | [Guide](docs/use-cases/01-sbom-license-enrichment.md) |
+| **Vanity Import URL Resolution** | Map vanity paths (`go.uber.org/zap`) to upstream Git repositories:<br/>`bomhound --config .bomhound.yaml bom.json` | [Guide](docs/use-cases/02-vanity-url-resolution.md) |
+| **GitHub Actions In-Place Release Pipeline** | Enrich SBOMs in-place within CI release workflows:<br/>`bomhound --in-place bom.json` | [Guide](docs/use-cases/03-github-actions-release-pipeline.md) |
+
+---
+
 ### 5. Batch Directory Processing
 Process all SBOMs in a directory concurrently:
 ```bash
