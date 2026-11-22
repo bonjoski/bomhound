@@ -16,6 +16,7 @@ import (
 	"github.com/bonjoski/bomhound/internal/resolver"
 	"github.com/bonjoski/bomhound/internal/utils"
 	"github.com/bonjoski/bomhound/pkg/bomhound"
+	"github.com/bonjoski/bomhound/pkg/ux"
 	"golang.org/x/term"
 )
 
@@ -34,6 +35,8 @@ func main() {
 	tokenStdin := flag.Bool("token-stdin", false, "Read GitHub token from standard input")
 	showVersion := flag.Bool("version", false, "Print version information and exit")
 	flag.BoolVar(showVersion, "v", false, "Print version information and exit (shorthand)")
+	showWhy := flag.Bool("why", false, "Show progressive-disclosure Apache-2.0 §4c / 17 U.S.C. §1202 context")
+	jsonErrors := flag.Bool("json", false, "Emit structured UB-CLI-v2 FixForwardError JSON on stderr failures")
 
 	flag.CommandLine.SetOutput(os.Stdout)
 	flag.Usage = func() {
@@ -42,10 +45,13 @@ func main() {
 Usage:
   bomhound [flags] <sbom-file-or-dir>
   cat sbom.json | bomhound [flags] > enriched.json
+  bomhound explain [attribution|cyclonedx|apache-4c|dmca-1202|sbom] [--why] [--json]
   bomhound vex kernel [flags]
 
 Subcommands:
+  explain [topic]      Explain attribution, cyclonedx, apache-4c, dmca-1202, or sbom (--why / --json)
   vex kernel [flags]   Generate OpenVEX statements from microVM Kconfig and symbol tables
+  version              Print version information and exit
 
 Flags:`)
 		flag.PrintDefaults()
@@ -53,6 +59,9 @@ Flags:`)
 
 	if len(os.Args) > 1 && os.Args[1] == "vex" {
 		os.Exit(runVEX(os.Args[2:]))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "explain" {
+		os.Exit(runExplain(os.Args[2:], os.Stdout, os.Stderr))
 	}
 
 	flag.Parse()
@@ -104,7 +113,17 @@ Flags:`)
 		TokenStdin:   *tokenStdin,
 	})
 	if err != nil {
-		slog.Error("Authentication failed", "error", err)
+		ffe := &ux.FixForwardError{
+			Tool:           "bomhound",
+			Code:           "BOMHOUND_AUTH_REQUIRED",
+			Summary:        fmt.Sprintf("Authentication failed: %v", err),
+			RemediationCmd: "locksmith add GH-Read",
+			WhyOneLiner:    "Bomhound fetches tokens from Locksmith, --token-stdin, or `gh auth token` (never plaintext env vars).",
+			DeepWhy:        "Reading GITHUB_TOKEN from ambient environment variables leaks credentials into /proc tables, subshells, and AI agent transcripts. Store a read-only PAT in Locksmith or pipe via --token-stdin in CI.",
+			References:     []string{"CWE-526", "CWE-798"},
+			ExitCode:       2,
+		}
+		_ = ffe.Render(os.Stderr, *jsonErrors, *showWhy)
 		os.Exit(2)
 	}
 
@@ -165,7 +184,17 @@ Flags:`)
 	}
 
 	if len(inputFiles) == 0 {
-		slog.Error("No .json or .xml SBOM files found")
+		ffe := &ux.FixForwardError{
+			Tool:           "bomhound",
+			Code:           "BOMHOUND_NO_INPUT_FILES",
+			Summary:        "No CycloneDX .json or .xml SBOM files found at target path",
+			RemediationCmd: "bomhound explain sbom --why",
+			WhyOneLiner:    "Pass a CycloneDX SBOM file, a directory containing SBOMs, or `-` to stream via stdin.",
+			DeepWhy:        "Generate a CycloneDX SBOM first (e.g. `syft . -o cyclonedx-json=sbom.cdx.json`) and then run `bomhound --in-place sbom.cdx.json` to enrich multi-author copyrights.",
+			References:     []string{"docs/use-cases/01-sbom-license-enrichment.md"},
+			ExitCode:       1,
+		}
+		_ = ffe.Render(os.Stderr, *jsonErrors, *showWhy)
 		os.Exit(1)
 	}
 	slog.Info("Found input files", "count", len(inputFiles))
@@ -253,13 +282,40 @@ Flags:`)
 		fmt.Fprintf(os.Stderr, "Overall Success Rate:     %.1f%%\n", rate)
 	}
 
+	fmt.Fprint(os.Stderr, "\n"+ux.FormatEnrichmentSummary(ux.EnrichmentSummary{
+		FilesProcessed: len(perFileStats),
+		Found:          totalFound,
+		Missing:        totalMissing,
+		OutputTarget:   *outputDir,
+	}, *showWhy))
+
 	// Compliance Gate Checks (Exit code 5)
 	if cfg.Compliance.FailOnMissing && totalMissing > 0 {
-		slog.Error("Compliance policy failed: missing copyrights detected", "missing", totalMissing)
+		ffe := &ux.FixForwardError{
+			Tool:           "bomhound",
+			Code:           "BOMHOUND_COMPLIANCE_GATE_FAILED",
+			Summary:        fmt.Sprintf("Compliance gate paused: %d component(s) missing copyright attribution", totalMissing),
+			RemediationCmd: "bomhound explain attribution --why",
+			WhyOneLiner:    "Missing copyright attributions can violate Apache-2.0 §4c and 17 U.S.C. §1202 redistribution rules.",
+			DeepWhy:        "Review unmatched PURLs in .bomhound.yaml (add vanity_urls for custom Go domains or exclude internal private modules) and re-run bomhound.",
+			References:     []string{"https://www.apache.org/licenses/LICENSE-2.0#redistribution", "https://www.law.cornell.edu/uscode/text/17/1202"},
+			ExitCode:       5,
+		}
+		_ = ffe.Render(os.Stderr, *jsonErrors, *showWhy)
 		os.Exit(5)
 	}
 	if cfg.Compliance.MinCoveragePercent > 0 && total > 0 && rate < cfg.Compliance.MinCoveragePercent {
-		slog.Error("Compliance policy failed: coverage below required threshold", "rate", rate, "min", cfg.Compliance.MinCoveragePercent)
+		ffe := &ux.FixForwardError{
+			Tool:           "bomhound",
+			Code:           "BOMHOUND_COMPLIANCE_COVERAGE_BELOW_MIN",
+			Summary:        fmt.Sprintf("Compliance gate paused: %.1f%% copyright coverage is below required %.1f%%", rate, cfg.Compliance.MinCoveragePercent),
+			RemediationCmd: "bomhound explain apache-4c --why",
+			WhyOneLiner:    "Your .bomhound.yaml enforces a minimum copyright coverage threshold for release SBOMs.",
+			DeepWhy:        "Add custom vanity_urls or internal exclude rules in .bomhound.yaml to resolve remaining components before release.",
+			References:     []string{"https://www.apache.org/licenses/LICENSE-2.0#redistribution"},
+			ExitCode:       5,
+		}
+		_ = ffe.Render(os.Stderr, *jsonErrors, *showWhy)
 		os.Exit(5)
 	}
 }

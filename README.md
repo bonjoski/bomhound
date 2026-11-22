@@ -89,6 +89,23 @@ Every primary developer use case is backed by dedicated, copy-pasteable recipes 
 | **CycloneDX Legal License Enrichment** | Enrich bare SBOMs with complete license texts and author copyrights:<br/>`bomhound --input bom.json --output enriched-bom.json` | [Guide](docs/use-cases/01-sbom-license-enrichment.md) |
 | **Vanity Import URL Resolution** | Map vanity paths (`go.uber.org/zap`) to upstream Git repositories:<br/>`bomhound --config .bomhound.yaml bom.json` | [Guide](docs/use-cases/02-vanity-url-resolution.md) |
 | **GitHub Actions In-Place Release Pipeline** | Enrich SBOMs in-place within CI release workflows:<br/>`bomhound --in-place bom.json` | [Guide](docs/use-cases/03-github-actions-release-pipeline.md) |
+| **Progressive Legal Attribution Disclosure (`--why`)** | Explain Apache-2.0 §4c, 17 U.S.C. §1202, and CycloneDX `Evidence.Copyright` requirements:<br/>`bomhound explain attribution --why` | [Recipe](#progressive-disclosure---why--calm-summaries) |
+
+### Progressive Disclosure (`--why`) & Calm Summaries
+
+`bomhound` emits a calm ≤3-line copyright coverage summary on `stderr` (keeping `stdout` pure CycloneDX JSON for UNIX pipes) and supports UB-CLI-v2 progressive disclosure via `bomhound explain`:
+
+```bash
+# Default calm attribution explanation (<= 3 lines)
+bomhound explain attribution
+
+# Expand Apache-2.0 §4c & 17 U.S.C. §1202 rationale (--why) or machine-readable JSON (--json)
+bomhound explain apache-4c --why
+bomhound explain dmca-1202 --why
+bomhound explain cyclonedx --json
+```
+
+Available `bomhound explain` topics: `attribution`, `cyclonedx`, `apache-4c`, `dmca-1202`, `sbom`.
 
 ---
 
