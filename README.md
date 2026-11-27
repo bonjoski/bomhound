@@ -19,6 +19,9 @@ A high-performance CLI tool and Go library for enriching Software Bill of Materi
 - **Policy Engine (`.bomhound.yaml`)**: Configurable exclusion rules with glob/prefix matching for internal, enterprise, or proprietary packages.
 - **CI/CD Quality Gate**: Enforce coverage thresholds with `--min-coverage <percent>` and `--fail-on-missing` returning non-zero exit codes (Exit Code 5) on compliance failure.
 - **High-Performance Caching**: Atomic read-merge-write caching with content-addressed directory stores and negative lookup caching with 7-day TTL.
+- **CycloneDX 1.6 AI-BOM Metadata (`--ai-bom`)**: Inject local AI models (`machine-learning-model`), MCP servers, and agent runtimes from a root-confined `.ai-bom.yaml` (`os.OpenRoot`) without mutating existing hashes or copyrights.
+- **DSSE-Signed OpenVEX (`bomhound vex --sign`)**: Wrap OpenVEX v0.2.0 statements in standard in-toto v1.0 / DSSE v1 Ed25519 envelopes cryptographically bound to the release binary SHA-256 digest (via local Ed25519 key, ephemeral offline keypair, or optional `LOCKSMITH_SOCKET`).
+- **Offline EU CRA Lifecycle Evidence Bundler (`bomhound bundle --cra`)**: Assemble and verify deterministic, air-gapped `BS EN 40000-1-1` / `1-2` `.tar.gz` bundles cross-verifying exact binary SHA-256 across OpenVEX and Soulcaster SLSA provenance (fail-closed Exit Code 10 on mix-and-match tampering, built-in secret scrubber, anti-tar-slip & bounded memory verification).
 
 ---
 
@@ -90,6 +93,7 @@ Every primary developer use case is backed by dedicated, copy-pasteable recipes 
 | **Vanity Import URL Resolution** | Map vanity paths (`go.uber.org/zap`) to upstream Git repositories:<br/>`bomhound --config .bomhound.yaml bom.json` | [Guide](docs/use-cases/02-vanity-url-resolution.md) |
 | **GitHub Actions In-Place Release Pipeline** | Enrich SBOMs in-place within CI release workflows:<br/>`bomhound --in-place bom.json` | [Guide](docs/use-cases/03-github-actions-release-pipeline.md) |
 | **Progressive Legal Attribution Disclosure (`--why`)** | Explain Apache-2.0 §4c, 17 U.S.C. §1202, and CycloneDX `Evidence.Copyright` requirements:<br/>`bomhound explain attribution --why` | [Recipe](#progressive-disclosure---why--calm-summaries) |
+| **EU CRA Lifecycle Evidence Bundle (`BS EN 40000-1-2`)** | Enrich CycloneDX 1.6 AI-BOM, sign DSSE OpenVEX, and assemble/verify deterministic offline CRA bundles:<br/>`bomhound bundle --cra ... && bomhound bundle --verify ...` | [Guide](docs/use-cases/eu-cra-lifecycle-evidence-bundle.md) |
 
 ### Progressive Disclosure (`--why`) & Calm Summaries
 

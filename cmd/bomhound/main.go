@@ -40,25 +40,35 @@ func main() {
 
 	flag.CommandLine.SetOutput(os.Stdout)
 	flag.Usage = func() {
-		fmt.Println(`bomhound — High-performance CycloneDX SBOM Legal Attribution Engine
+		fmt.Println(`bomhound — High-performance CycloneDX SBOM Legal Attribution & EU CRA Evidence Engine
 
 Usage:
   bomhound [flags] <sbom-file-or-dir>
   cat sbom.json | bomhound [flags] > enriched.json
+  bomhound enrich --input <sbom.cdx.json> [--ai-bom .ai-bom.yaml] --output <enriched.cdx.json>
   bomhound explain [attribution|cyclonedx|apache-4c|dmca-1202|sbom] [--why] [--json]
-  bomhound vex kernel [flags]
+  bomhound vex [--sign --binary <bin> | --verify --binary <bin> --pubkey <pub.pem> | kernel] [flags]
+  bomhound bundle [--cra | --verify] [flags]
 
 Subcommands:
+  enrich [flags]       Enrich CycloneDX SBOMs with legal attribution and optional CycloneDX 1.6 AI-BOM metadata
   explain [topic]      Explain attribution, cyclonedx, apache-4c, dmca-1202, or sbom (--why / --json)
-  vex kernel [flags]   Generate OpenVEX statements from microVM Kconfig and symbol tables
+  vex [flags]          Generate, DSSE-sign, and verify OpenVEX v0.2.0 statements bound to artifact SHA-256
+  bundle [flags]       Assemble and verify offline EU CRA (BS EN 40000-1-1 / 1-2) lifecycle evidence bundles
   version              Print version information and exit
 
 Flags:`)
 		flag.PrintDefaults()
 	}
 
+	if len(os.Args) > 1 && os.Args[1] == "enrich" {
+		os.Exit(runEnrich(os.Args[2:]))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "vex" {
 		os.Exit(runVEX(os.Args[2:]))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "bundle" {
+		os.Exit(runBundle(os.Args[2:]))
 	}
 	if len(os.Args) > 1 && os.Args[1] == "explain" {
 		os.Exit(runExplain(os.Args[2:], os.Stdout, os.Stderr))
